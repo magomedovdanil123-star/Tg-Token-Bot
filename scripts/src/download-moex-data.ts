@@ -1,0 +1,773 @@
+import { and, asc, eq, sql } from "drizzle-orm";
+import {
+  candles,
+  db,
+  downloadRuns,
+  features,
+  marketContext,
+  moexTickers,
+  pool,
+} from "@workspace/db";
+
+type JsonBlock = { columns?: string[]; data?: unknown[][] };
+type MoexResponse = Record<string, JsonBlock | undefined>;
+type CandleRow = {
+  ticker: string;
+  timestamp: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  value?: number | null;
+};
+
+const API_ROOT = "https://iss.moex.com/iss";
+// MOEX ISS supports 10-minute candles (not 15-minute candles) for this endpoint.
+const TIMEFRAME = "10m";
+const INTERVAL = 10;
+const PAGE_SIZE = 500;
+const REQUEST_DELAY_MS = 120;
+
+function arg(name: string, fallback: string): string {
+  const prefix = `--${name}=`;
+  const value = process.argv.find((item) => item.startsWith(prefix));
+  return value ? value.slice(prefix.length) : fallback;
+}
+
+function integerArg(name: string, fallback: number): number {
+  const value = Number(arg(name, String(fallback)));
+  return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function numeric(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function blockRows(response: MoexResponse, key: string): Record<string, unknown>[] {
+  const block = response[key];
+  if (!block?.columns || !block.data) return [];
+  return block.data.map((row) =>
+    Object.fromEntries(block.columns!.map((column, index) => [column.toLowerCase(), row[index]])),
+  );
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchMoex(
+  path: string,
+  params: Record<string, string | number | undefined>,
+): Promise<MoexResponse> {
+  const url = new URL(`${API_ROOT}${path}`);
+  url.searchParams.set("iss.meta", "off");
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) url.searchParams.set(key, String(value));
+  }
+
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: { accept: "application/json", "user-agent": "InvestAI/1.0" },
+      });
+      if (response.ok) return (await response.json()) as MoexResponse;
+      if (response.status < 500 && response.status !== 429) {
+        throw new Error(`MOEX HTTP ${response.status} for ${url.pathname}`);
+      }
+    } catch (error) {
+      if (attempt === 4) throw error;
+    }
+    await sleep(500 * attempt);
+  }
+  throw new Error(`MOEX request failed: ${path}`);
+}
+
+async function getLiquidTickers(limit: number) {
+  const response = await fetchMoex(
+    "/engines/stock/markets/shares/boards/TQBR/securities.json",
+    {
+      "iss.only": "securities",
+      "securities.columns": "SECID,SHORTNAME,SECNAME,SECTYPE,ISSUECAPITALIZATION",
+      limit: 300,
+    },
+  );
+  return blockRows(response, "securities")
+    .map((row) => ({
+      secid: String(row.secid ?? ""),
+      shortName: row.shortname ? String(row.shortname) : null,
+      securityType: row.sectype ? String(row.sectype) : null,
+      capitalization: numeric(row.issuecapitalization),
+    }))
+    .filter(
+      (row) =>
+        row.secid &&
+        row.secid !== "null" &&
+        // SECTYPE "1" is a share; ETF/fund rows use "J" and are excluded.
+        row.securityType === "1",
+    )
+    .sort((a, b) => (b.capitalization ?? 0) - (a.capitalization ?? 0))
+    .slice(0, limit);
+}
+
+async function getCandles(
+  ticker: string,
+  start: string,
+  till: string,
+  engine: "stock" | "index" = "stock",
+  market: "shares" | "index" = "shares",
+  board = "TQBR",
+): Promise<CandleRow[]> {
+  const result: CandleRow[] = [];
+  for (let startIndex = 0; ; startIndex += PAGE_SIZE) {
+    const response = await fetchMoex(
+      `/engines/${engine}/markets/${market}/boards/${board}/securities/${encodeURIComponent(ticker)}/candles.json`,
+      { interval: INTERVAL, from: start, till, start: startIndex, limit: PAGE_SIZE },
+    );
+    const rows = blockRows(response, "candles");
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      const timestamp = new Date(String(row.begin ?? row.end ?? ""));
+      const open = numeric(row.open);
+      const high = numeric(row.high);
+      const low = numeric(row.low);
+      const close = numeric(row.close);
+      if (
+        Number.isNaN(timestamp.getTime()) ||
+        open === undefined ||
+        high === undefined ||
+        low === undefined ||
+        close === undefined
+      ) {
+        continue;
+      }
+      result.push({
+        ticker,
+        timestamp,
+        open,
+        high,
+        low,
+        close,
+        volume: numeric(row.volume) ?? 0,
+        value: numeric(row.value),
+      });
+    }
+    if (rows.length < PAGE_SIZE) break;
+    await sleep(REQUEST_DELAY_MS);
+  }
+  return result;
+}
+
+function average(values: number[]): number | undefined {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined;
+}
+
+function ema(values: number[], period: number): number | undefined {
+  if (values.length < period) return undefined;
+  const multiplier = 2 / (period + 1);
+  let current = average(values.slice(0, period))!;
+  for (const value of values.slice(period)) current = (value - current) * multiplier + current;
+  return current;
+}
+
+function emaSeries(values: number[], period: number): (number | undefined)[] {
+  const output: (number | undefined)[] = Array.from({ length: values.length });
+  if (values.length < period) return output;
+  const multiplier = 2 / (period + 1);
+  let current = average(values.slice(0, period))!;
+  output[period - 1] = current;
+  for (let index = period; index < values.length; index += 1) {
+    current = (values[index] - current) * multiplier + current;
+    output[index] = current;
+  }
+  return output;
+}
+
+function rsi(values: number[], period = 14): number | undefined {
+  if (values.length <= period) return undefined;
+  let gains = 0;
+  let losses = 0;
+  for (let index = 1; index <= period; index += 1) {
+    const change = values[index] - values[index - 1];
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  for (let index = period + 1; index < values.length; index += 1) {
+    const change = values[index] - values[index - 1];
+    gains = (gains * (period - 1) + Math.max(change, 0)) / period;
+    losses = (losses * (period - 1) + Math.max(-change, 0)) / period;
+  }
+  if (losses === 0) return 100;
+  return 100 - 100 / (1 + gains / losses);
+}
+
+function rsiSeries(values: number[], period = 14): (number | undefined)[] {
+  const output: (number | undefined)[] = Array.from({ length: values.length });
+  if (values.length <= period) return output;
+  let gains = 0;
+  let losses = 0;
+  for (let index = 1; index <= period; index += 1) {
+    const change = values[index] - values[index - 1];
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  output[period] = losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+  for (let index = period + 1; index < values.length; index += 1) {
+    const change = values[index] - values[index - 1];
+    gains = (gains * (period - 1) + Math.max(change, 0)) / period;
+    losses = (losses * (period - 1) + Math.max(-change, 0)) / period;
+    output[index] = losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+  }
+  return output;
+}
+
+function featureRows(rows: (CandleRow & { id: number })[]) {
+  const closes = rows.map((row) => row.close);
+  const ema20Series = emaSeries(closes, 20);
+  const ema50Series = emaSeries(closes, 50);
+  const ema100Series = emaSeries(closes, 100);
+  const ema200Series = emaSeries(closes, 200);
+  const ema12Series = emaSeries(closes, 12);
+  const ema26Series = emaSeries(closes, 26);
+  const macdSeries = closes.map((_close, index) => {
+    if (ema12Series[index] === undefined || ema26Series[index] === undefined) {
+      return undefined;
+    }
+    return ema12Series[index]! - ema26Series[index]!;
+  });
+  const macdValues = macdSeries.filter((value): value is number => value !== undefined);
+  const macdSignalValues = emaSeries(macdValues, 9);
+  const macdSignalSeries: (number | undefined)[] = Array.from({ length: rows.length });
+  let signalIndex = 0;
+  for (let index = 0; index < macdSeries.length; index += 1) {
+    if (macdSeries[index] !== undefined) {
+      macdSignalSeries[index] = macdSignalValues[signalIndex];
+      signalIndex += 1;
+    }
+  }
+  const rsiValues = rsiSeries(closes);
+  const output = [];
+  let greenStreak = 0;
+  let redStreak = 0;
+  let cumulativeValue = 0;
+  let cumulativeVolume = 0;
+  let obv = 0;
+  let accumulationDistribution = 0;
+
+  const standardDeviation = (values: number[]) => {
+    if (values.length < 2) return undefined;
+    const mean = average(values);
+    if (mean === undefined) return undefined;
+    return Math.sqrt(
+      values.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+        (values.length - 1),
+    );
+  };
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const previous = rows[index - 1];
+    const range = Math.max(row.high - row.low, 0);
+    const body = Math.abs(row.close - row.open);
+    const window20 = rows.slice(Math.max(0, index - 19), index + 1);
+    const highs = rows.slice(Math.max(0, index - 199), index + 1).map((item) => item.high);
+    const lows = rows.slice(Math.max(0, index - 199), index + 1).map((item) => item.low);
+    const volumeAverage = average(window20.map((item) => item.volume));
+    const macd = macdSeries[index];
+    const macdSignal = macdSignalSeries[index];
+    const middle = average(window20.map((item) => item.close));
+    const deviation = middle === undefined
+      ? undefined
+      : Math.sqrt(average(window20.map((item) => (item.close - middle) ** 2)) ?? 0);
+    const previousRange = previous ? Math.max(previous.high - previous.low, 0) : undefined;
+    const priorClose = previous?.close ?? row.open;
+    const trueRange = Math.max(row.high - row.low, Math.abs(row.high - priorClose), Math.abs(row.low - priorClose));
+    cumulativeValue += (row.value ?? row.close * row.volume);
+    cumulativeVolume += row.volume;
+    if (previous) {
+      if (row.close > previous.close) obv += row.volume;
+      else if (row.close < previous.close) obv -= row.volume;
+    }
+    accumulationDistribution += range
+      ? ((2 * row.close - row.high - row.low) / range) * row.volume
+      : 0;
+
+    if (row.close >= row.open) {
+      greenStreak += 1;
+      redStreak = 0;
+    } else {
+      redStreak += 1;
+      greenStreak = 0;
+    }
+
+    const returns = (period: number) => {
+      const base = rows[index - period]?.close;
+      return base ? ((row.close - base) / base) * 100 : undefined;
+    };
+    const rsiWindow = rsiValues
+      .slice(Math.max(0, index - 13), index + 1)
+      .filter((value): value is number => value !== undefined);
+    const currentRsi = rsiValues[index];
+    const rsiLow = rsiWindow.length ? Math.min(...rsiWindow) : undefined;
+    const rsiHigh = rsiWindow.length ? Math.max(...rsiWindow) : undefined;
+    const stochasticRsi =
+      currentRsi !== undefined &&
+      rsiLow !== undefined &&
+      rsiHigh !== undefined &&
+      rsiHigh !== rsiLow
+        ? ((currentRsi - rsiLow) / (rsiHigh - rsiLow)) * 100
+        : undefined;
+    const typicalPrice = (row.high + row.low + row.close) / 3;
+    const typicalWindow = rows
+      .slice(Math.max(0, index - 19), index + 1)
+      .map((item) => (item.high + item.low + item.close) / 3);
+    const typicalAverage = average(typicalWindow);
+    const meanDeviation = typicalAverage === undefined
+      ? undefined
+      : average(typicalWindow.map((value) => Math.abs(value - typicalAverage)));
+    const cci =
+      typicalAverage !== undefined &&
+      meanDeviation !== undefined &&
+      meanDeviation !== 0
+        ? (typicalPrice - typicalAverage) / (0.015 * meanDeviation)
+        : undefined;
+    const oscillatorWindow = rows.slice(Math.max(0, index - 13), index + 1);
+    const oscillatorHigh = oscillatorWindow.length
+      ? Math.max(...oscillatorWindow.map((item) => item.high))
+      : undefined;
+    const oscillatorLow = oscillatorWindow.length
+      ? Math.min(...oscillatorWindow.map((item) => item.low))
+      : undefined;
+    const williamsR =
+      oscillatorHigh !== undefined &&
+      oscillatorLow !== undefined &&
+      oscillatorHigh !== oscillatorLow
+        ? ((oscillatorHigh - row.close) / (oscillatorHigh - oscillatorLow)) * -100
+        : undefined;
+    const logReturns = rows
+      .slice(Math.max(1, index - 19), index + 1)
+      .map((item, windowIndex) => {
+        const base = rows[Math.max(0, index - 19) + windowIndex - 1]?.close;
+        return base && item.close > 0 ? Math.log(item.close / base) : undefined;
+      })
+      .filter((value): value is number => value !== undefined);
+    const historicalVolatility = standardDeviation(logReturns);
+    const previousEma20 = ema20Series[index - 1];
+    const currentEma20 = ema20Series[index];
+    const previousEma50 = ema50Series[index - 1];
+    const currentEma50 = ema50Series[index];
+    const emaCross =
+      previousEma20 !== undefined &&
+      currentEma20 !== undefined &&
+      previousEma50 !== undefined &&
+      currentEma50 !== undefined
+        ? previousEma20 <= previousEma50 && currentEma20 > currentEma50
+          ? "golden_cross"
+          : previousEma20 >= previousEma50 && currentEma20 < currentEma50
+            ? "death_cross"
+            : undefined
+        : undefined;
+
+    output.push({
+      candleId: row.id,
+      ticker: row.ticker,
+      timestamp: row.timestamp,
+      priceChange1: returns(1),
+      priceChange3: returns(3),
+      priceChange5: returns(5),
+      priceChange10: returns(10),
+      priceChange15: returns(15),
+      priceChange30: returns(30),
+      priceChange60: returns(60),
+      acceleration: previous?.close && returns(1) !== undefined
+        ? returns(1)! - ((previous.close - (rows[index - 2]?.close ?? previous.open)) / previous.close) * 100
+        : undefined,
+      distanceToHigh: highs.length ? ((row.close - Math.max(...highs)) / row.close) * 100 : undefined,
+      distanceToLow: lows.length ? ((row.close - Math.min(...lows)) / row.close) * 100 : undefined,
+      bodySize: body,
+      upperShadow: row.high - Math.max(row.open, row.close),
+      lowerShadow: Math.min(row.open, row.close) - row.low,
+      bodyToRange: range ? body / range : 0,
+      greenStreak,
+      redStreak,
+      isDoji: range > 0 && body / range < 0.1 ? 1 : 0,
+      isHammer: range > 0 && (Math.min(row.open, row.close) - row.low) > body * 2 ? 1 : 0,
+      isEngulfing: previous && row.open <= previous.close && row.close >= previous.open ? 1 : 0,
+      isInsideBar: previous && row.high <= previous.high && row.low >= previous.low ? 1 : 0,
+      isOutsideBar: previous && row.high >= previous.high && row.low <= previous.low ? 1 : 0,
+      volume: row.volume,
+      avgVolume20: volumeAverage,
+      relativeVolume: volumeAverage ? row.volume / volumeAverage : undefined,
+      volumeSpike: volumeAverage && row.volume > volumeAverage * 2 ? 1 : 0,
+      atr: trueRange,
+      candleRange: range,
+      volatilityChange: previousRange ? ((range - previousRange) / previousRange) * 100 : undefined,
+      ema20: ema20Series[index],
+      ema50: ema50Series[index],
+      ema100: ema100Series[index],
+      ema200: ema200Series[index],
+      distanceToEma20: ema20Series[index]
+        ? ((row.close - ema20Series[index]!) / ema20Series[index]!) * 100
+        : undefined,
+      distanceToEma50: ema50Series[index]
+        ? ((row.close - ema50Series[index]!) / ema50Series[index]!) * 100
+        : undefined,
+      distanceToEma100: ema100Series[index]
+        ? ((row.close - ema100Series[index]!) / ema100Series[index]!) * 100
+        : undefined,
+      distanceToEma200: ema200Series[index]
+        ? ((row.close - ema200Series[index]!) / ema200Series[index]!) * 100
+        : undefined,
+      emaCross,
+      trendStrength:
+        currentEma20 !== undefined && currentEma50 !== undefined
+          ? (Math.abs(currentEma20 - currentEma50) / row.close) * 100
+          : undefined,
+      rsi: currentRsi,
+      macd,
+      macdSignal,
+      macdHist:
+        macd === undefined || macdSignal === undefined
+          ? undefined
+          : macd - macdSignal,
+      bbUpper: middle === undefined || deviation === undefined ? undefined : middle + deviation * 2,
+      bbMiddle: middle,
+      bbLower: middle === undefined || deviation === undefined ? undefined : middle - deviation * 2,
+      bbWidth:
+        middle === undefined || deviation === undefined || middle === 0
+          ? undefined
+          : (deviation * 4) / middle,
+      adx: undefined,
+      historicalVolatility:
+        historicalVolatility === undefined
+          ? undefined
+          : historicalVolatility * Math.sqrt(252) * 100,
+      stochasticRsi,
+      cci,
+      williamsR,
+      vwap: cumulativeVolume ? cumulativeValue / cumulativeVolume : undefined,
+      obv,
+      mfi: (() => {
+        const flowWindow = rows.slice(Math.max(0, index - 13), index + 1);
+        let positive = 0;
+        let negative = 0;
+        for (let flowIndex = 0; flowIndex < flowWindow.length; flowIndex += 1) {
+          const flowRow = flowWindow[flowIndex];
+          const flowTypical = (flowRow.high + flowRow.low + flowRow.close) / 3;
+          const priorFlowRow = flowWindow[flowIndex - 1];
+          const moneyFlow = flowTypical * flowRow.volume;
+          if (!priorFlowRow || flowTypical >= (priorFlowRow.high + priorFlowRow.low + priorFlowRow.close) / 3) {
+            positive += moneyFlow;
+          } else {
+            negative += moneyFlow;
+          }
+        }
+        return negative === 0 ? (positive ? 100 : undefined) : 100 - 100 / (1 + positive / negative);
+      })(),
+      accumulationDistribution,
+      volumeProfile: { [row.close.toFixed(2)]: row.volume },
+    });
+  }
+  return output;
+}
+
+async function saveCandles(rows: CandleRow[]) {
+  if (rows.length === 0) return 0;
+  let inserted = 0;
+  for (let index = 0; index < rows.length; index += 500) {
+    const batch = rows.slice(index, index + 500);
+    const saved = await db
+      .insert(candles)
+      .values(batch.map((row) => ({ ...row, timeframe: TIMEFRAME })))
+      .onConflictDoNothing({
+        target: [candles.ticker, candles.timeframe, candles.timestamp],
+      })
+      .returning({ id: candles.id });
+    inserted += saved.length;
+  }
+  return inserted;
+}
+
+async function calculateFeatures(ticker: string) {
+  const rows = await db
+    .select()
+    .from(candles)
+    .where(and(eq(candles.ticker, ticker), eq(candles.timeframe, TIMEFRAME)))
+    .orderBy(asc(candles.timestamp));
+  if (rows.length < 2) return 0;
+
+  const calculated = featureRows(rows);
+  const excluded = (column: string) => sql.raw(`excluded."${column}"`);
+  let inserted = 0;
+  for (let index = 0; index < calculated.length; index += 500) {
+    const saved = await db
+      .insert(features)
+      .values(calculated.slice(index, index + 500))
+      .onConflictDoUpdate({
+        target: [features.ticker, features.timestamp],
+        set: {
+          candleId: excluded("candle_id"),
+          priceChange1: excluded("price_change_1"),
+          priceChange3: excluded("price_change_3"),
+          priceChange5: excluded("price_change_5"),
+          priceChange10: excluded("price_change_10"),
+          priceChange15: excluded("price_change_15"),
+          priceChange30: excluded("price_change_30"),
+          priceChange60: excluded("price_change_60"),
+          acceleration: excluded("acceleration"),
+          distanceToHigh: excluded("distance_to_high"),
+          distanceToLow: excluded("distance_to_low"),
+          bodySize: excluded("body_size"),
+          upperShadow: excluded("upper_shadow"),
+          lowerShadow: excluded("lower_shadow"),
+          bodyToRange: excluded("body_to_range"),
+          greenStreak: excluded("green_streak"),
+          redStreak: excluded("red_streak"),
+          isDoji: excluded("is_doji"),
+          isHammer: excluded("is_hammer"),
+          isEngulfing: excluded("is_engulfing"),
+          isInsideBar: excluded("is_inside_bar"),
+          isOutsideBar: excluded("is_outside_bar"),
+          volume: excluded("volume"),
+          avgVolume20: excluded("avg_volume_20"),
+          relativeVolume: excluded("relative_volume"),
+          volumeSpike: excluded("volume_spike"),
+          atr: excluded("atr"),
+          candleRange: excluded("candle_range"),
+          volatilityChange: excluded("volatility_change"),
+          ema20: excluded("ema_20"),
+          ema50: excluded("ema_50"),
+          ema100: excluded("ema_100"),
+          ema200: excluded("ema_200"),
+          distanceToEma20: excluded("distance_to_ema_20"),
+          distanceToEma50: excluded("distance_to_ema_50"),
+          distanceToEma100: excluded("distance_to_ema_100"),
+          distanceToEma200: excluded("distance_to_ema_200"),
+          emaCross: excluded("ema_cross"),
+          trendStrength: excluded("trend_strength"),
+          rsi: excluded("rsi"),
+          macd: excluded("macd"),
+          macdSignal: excluded("macd_signal"),
+          macdHist: excluded("macd_hist"),
+          stochasticRsi: excluded("stochastic_rsi"),
+          cci: excluded("cci"),
+          williamsR: excluded("williams_r"),
+          bbUpper: excluded("bb_upper"),
+          bbMiddle: excluded("bb_middle"),
+          bbLower: excluded("bb_lower"),
+          bbWidth: excluded("bb_width"),
+          adx: excluded("adx"),
+          historicalVolatility: excluded("historical_volatility"),
+          vwap: excluded("vwap"),
+          obv: excluded("obv"),
+          mfi: excluded("mfi"),
+          accumulationDistribution: excluded("accumulation_distribution"),
+          volumeProfile: excluded("volume_profile"),
+        },
+      })
+      .returning({ id: features.id });
+    inserted += saved.length;
+  }
+  return inserted;
+}
+
+async function saveTicker(
+  ticker: {
+    secid: string;
+    shortName: string | null;
+    securityType?: string | null;
+    capitalization?: number;
+  },
+  rank: number,
+) {
+  await db
+    .insert(moexTickers)
+    .values({
+      secid: ticker.secid,
+      shortName: ticker.shortName,
+      capitalization: ticker.capitalization,
+      rank,
+    })
+    .onConflictDoUpdate({
+      target: moexTickers.secid,
+      set: {
+        shortName: ticker.shortName,
+        capitalization: ticker.capitalization,
+        rank,
+        isActive: true,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+async function main() {
+  if (arg("features-only", "false") === "true") {
+    const featuresStart = integerArg("features-start", 0);
+    const featuresLimit = integerArg("features-limit", 1000);
+    const tickerRows = (
+      await db
+        .selectDistinct({ ticker: candles.ticker })
+        .from(candles)
+        .orderBy(asc(candles.ticker))
+    ).slice(featuresStart, featuresStart + featuresLimit);
+    let refreshed = 0;
+    for (const { ticker } of tickerRows) {
+      const count = await calculateFeatures(ticker);
+      refreshed += count;
+      console.log(`${ticker}: ${count} признаков обновлено`);
+    }
+    console.log(
+      `Готово. Обновлено признаков: ${refreshed}. Диапазон тикеров: ${featuresStart}–${featuresStart + tickerRows.length - 1}`,
+    );
+    await pool.end();
+    return;
+  }
+
+  const years = Math.max(1, Number(arg("years", "2")));
+  const maxTickers = Math.max(1, Math.min(100, integerArg("max-tickers", 100)));
+  const startRank = Math.min(99, integerArg("start-rank", 0));
+  const skipContext = arg("skip-context", "false") === "true";
+  const end = new Date();
+  const start = new Date(end);
+  start.setUTCFullYear(start.getUTCFullYear() - years);
+  const startDate = start.toISOString().slice(0, 10);
+  const endDate = end.toISOString().slice(0, 10);
+  const run = await db
+    .insert(downloadRuns)
+    .values({ years, maxTickers, status: "running" })
+    .returning({ id: downloadRuns.id });
+  const runId = run[0]?.id;
+  let tickersProcessed = 0;
+  let candlesLoaded = 0;
+  let featuresCalculated = 0;
+  const errors: string[] = [];
+
+  try {
+    await db
+      .update(downloadRuns)
+      .set({
+        status: "failed",
+        finishedAt: new Date(),
+        errorMessage: "Прервано новым запуском импорта",
+      })
+      .where(eq(downloadRuns.status, "running"));
+    await db
+      .update(downloadRuns)
+      .set({ status: "running", finishedAt: null, errorMessage: null })
+      .where(eq(downloadRuns.id, runId!));
+
+    console.log(`Получаю топ-${maxTickers} акций MOEX...`);
+    const allTickers = await getLiquidTickers(Math.min(100, startRank + maxTickers));
+    const tickers = allTickers.slice(startRank, startRank + maxTickers);
+    console.log(`Найдено тикеров: ${tickers.length}`);
+    // Keep the persisted universe aligned with the current MOEX share list.
+    await db.update(moexTickers).set({ isActive: false });
+    for (let index = 0; index < allTickers.length; index += 1) {
+      await saveTicker(allTickers[index], index + 1);
+    }
+
+    for (let index = 0; index < tickers.length; index += 1) {
+      const ticker = tickers[index];
+      try {
+        await saveTicker(ticker, startRank + index + 1);
+        const rows = await getCandles(ticker.secid, startDate, endDate);
+        const inserted = await saveCandles(rows);
+        const featureCount = await calculateFeatures(ticker.secid);
+        candlesLoaded += inserted;
+        featuresCalculated += featureCount;
+        tickersProcessed += 1;
+        await db
+          .update(downloadRuns)
+          .set({
+            tickersProcessed,
+            candlesLoaded,
+            featuresCalculated,
+            errorCount: errors.length,
+            errorMessage: errors.slice(0, 20).join("\n") || null,
+          })
+          .where(eq(downloadRuns.id, runId!));
+        console.log(
+          `[${startRank + index + 1}/100] ${ticker.secid}: ${rows.length} свечей, ${featureCount} признаков`,
+        );
+      } catch (error) {
+        const message = `${ticker.secid}: ${error instanceof Error ? error.message : String(error)}`;
+        errors.push(message);
+        console.error(`Ошибка: ${message}`);
+      }
+      await sleep(REQUEST_DELAY_MS);
+    }
+
+    if (!skipContext) {
+      try {
+        const indexRows = await getCandles(
+          "IMOEX",
+          startDate,
+          endDate,
+          "stock",
+          "index",
+          "SNDX",
+        );
+        candlesLoaded += await saveCandles(indexRows);
+        if (indexRows.length > 0) {
+          await db
+            .insert(marketContext)
+            .values(
+              indexRows.map((row) => ({
+                timestamp: row.timestamp,
+                imoexPrice: row.close,
+                imoexChange: row.open
+                  ? ((row.close - row.open) / row.open) * 100
+                  : undefined,
+                imoexVolume: row.volume,
+              })),
+            )
+            .onConflictDoNothing({ target: marketContext.timestamp });
+        }
+        featuresCalculated += await calculateFeatures("IMOEX");
+        console.log(`IMOEX: ${indexRows.length} свечей`);
+      } catch (error) {
+        errors.push(
+          `IMOEX: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        console.error(`Ошибка IMOEX: ${errors.at(-1)}`);
+      }
+    }
+
+    await db
+      .update(downloadRuns)
+      .set({
+        status: errors.length ? "completed_with_errors" : "completed",
+        tickersProcessed,
+        candlesLoaded,
+        featuresCalculated,
+        errorCount: errors.length,
+        errorMessage: errors.slice(0, 20).join("\n") || null,
+        finishedAt: new Date(),
+      })
+      .where(eq(downloadRuns.id, runId!));
+    console.log(
+      `Готово. Тикеров: ${tickersProcessed}; свечей добавлено: ${candlesLoaded}; признаков: ${featuresCalculated}; ошибок: ${errors.length}`,
+    );
+  } catch (error) {
+    await db
+      .update(downloadRuns)
+      .set({
+        status: "failed",
+        errorCount: errors.length + 1,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        finishedAt: new Date(),
+      })
+      .where(eq(downloadRuns.id, runId!));
+    throw error;
+  } finally {
+    await pool.end();
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

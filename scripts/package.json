@@ -5,7 +5,14 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "download-moex": "tsx ./src/download-moex-data.ts",
+    "refresh-features": "tsx ./src/download-moex-data.ts --features-only=true",
+    "download-context": "tsx ./src/download-market-context.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@workspace/db": "workspace:*",
+    "drizzle-orm": "catalog:"
   },
   "devDependencies": {
     "@types/node": "catalog:",

@@ -1,6 +1,6 @@
-# [Project name]
+# Invest AI data platform
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Stores MOEX market candles, technical indicators, market context, and research results in PostgreSQL for later analysis.
 
 ## Run & Operate
 
@@ -9,6 +9,12 @@ _Replace the heading above with the project's name, and this line with one sente
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
+- `pnpm --filter @workspace/scripts run download-moex` — load two years of 10-minute MOEX data for the top 100 shares
+- `pnpm --filter @workspace/scripts run download-context` — load daily IMOEX, RTSI, USD/RUB, EUR/RUB, and CNY/RUB context rows
+- `pnpm --filter @workspace/scripts run refresh-features` — recalculate and update all stored feature rows after schema/indicator changes
+- `pnpm --filter @workspace/scripts run refresh-features -- --features-start=45 --features-limit=20` — refresh a bounded ticker range
+- `pnpm --filter @workspace/scripts run download-moex -- --years=1 --max-tickers=10` — run a smaller import
+- `pnpm --filter @workspace/scripts run download-moex -- --years=2 --start-rank=10 --max-tickers=10 --skip-context=true` — resume a chunk without reloading IMOEX
 - Required env: `DATABASE_URL` — Postgres connection string
 
 ## Stack
@@ -22,15 +28,21 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `lib/db/src/schema/index.ts` — PostgreSQL schema for tickers, candles, features, market context, patterns, and import runs.
+- `scripts/src/download-moex-data.ts` — paginated MOEX ISS importer and technical indicator calculation.
+- `artifacts/api-server` — existing API server; Telegram bot code is intentionally not part of this data setup.
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Candles and features use a unique `(ticker, timeframe, timestamp)` key so rerunning imports is safe.
+- MOEX data is fetched through the public ISS API using native Node fetch; no Telegram credentials are required.
+- Import runs are recorded in `download_runs` so long imports have an auditable status and error summary.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- PostgreSQL storage for ranked MOEX tickers and 10-minute candles.
+- Derived trend, momentum, volatility, candle, volume, Bollinger, MACD, RSI, ATR, VWAP, OBV, MFI, CCI, and Williams %R features.
+- Separate market context, macro, pattern, signal, strategy, and backtest tables for the research engine.
 
 ## User preferences
 

@@ -1,0 +1,1 @@
+- [MOEX importer](moex-import.md) — MOEX ISS candles use a supported 10-minute interval here; filter ETF instruments out of the share universe.
