@@ -1,0 +1,539 @@
+АВТОМАТИЧЕСКАЯ ЗАГРУЗКА ДАННЫХ MOEX
+
+Создам полностью рабочий модуль автоматической загрузки данных топ-100 акций MOEX за 2 года!
+
+📄 Файл: scripts/download_moex_data.py
+
+Создайте новую папку scripts/ и файл внутри:
+
+
+"""
+Скрипт автоматической загрузки исторических данных MOEX
+Загружает топ-100 акций за последние 2 года
+"""
+import asyncio
+import sys
+from pathlib import Path
+from datetime import datetime, timedelta
+
+# Добавляем корневую папку проекта в путь
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from data_collection.moex_client import MOEXClient
+from database.connection import init_db, get_db
+from database.models import Candle, Feature, MarketContext
+from research.feature_engine import FeatureEngine
+from utils.logger import logger
+import pandas as pd
+from tqdm import tqdm
+
+
+class MOEXDataDownloader:
+    """Загрузчик данных MOEX"""
+    
+    def __init__(self):
+        self.feature_engine = FeatureEngine()
+        self.stats = {
+            'tickers_processed': 0,
+            'candles_loaded': 0,
+            'features_calculated': 0,
+            'errors': []
+        }
+    
+    async def download_all(self, years: int = 2, max_tickers: int = 100):
+        """
+        Загрузить все данные
+        
+        Args:
+            years: Количество лет истории
+            max_tickers: Максимум тикеров
+        """
+        logger.info("="*80)
+        logger.info("📥 ЗАГРУЗКА ИСТОРИЧЕСКИХ ДАННЫХ MOEX")
+        logger.info("="*80)
+        logger.info(f"📅 Период: {years} года назад -> сегодня")
+        logger.info(f"📊 Максимум тикеров: {max_tickers}")
+        logger.info("="*80 + "\n")
+        
+        start_time = datetime.now()
+        
+        async with MOEXClient() as client:
+            # Шаг 1: Получаем список топ-100 акций IMOEX
+            logger.info("📋 ШАГ 1/4: Получение списка топ-100 акций IMOEX")
+            logger.info("-"*80)
+            
+            tickers = await client.get_liquid_stocks(limit=max_tickers)
+            
+            if not tickers:
+                logger.error("❌ Не удалось получить список акций!")
+                return
+            
+            logger.info(f"✅ Получено {len(tickers)} тикеров")
+            logger.info(f"📝 Примеры: {', '.join(tickers[:10])}...")
+            print()
+            
+            # Шаг 2: Загружаем индекс IMOEX
+            logger.info("📊 ШАГ 2/4: Загрузка индекса IMOEX")
+            logger.info("-"*80)
+            
+            await self._download_index(client, years)
+            print()
+            
+            # Шаг 3: Загружаем свечи всех акций
+            logger.info(f"📈 ШАГ 3/4: Загрузка свечей {len(tickers)} акций")
+            logger.info("-"*80)
+            
+            await self._download_all_tickers(client, tickers, years)
+            print()
+            
+            # Шаг 4: Рассчитываем технические индикаторы
+            logger.info("🧮 ШАГ 4/4: Расчет технических индикаторов")
+            logger.info("-"*80)
+            
+            await self._calculate_features(['IMOEX'] + tickers)
+            print()
+        
+        # Итоговая статистика
+        duration = (datetime.now() - start_time).total_seconds()
+        
+        logger.info("="*80)
+        logger.info("✅ ЗАГРУЗКА ЗАВЕРШЕНА!")
+        logger.info("="*80)
+        logger.info(f"⏱  Время выполнения: {duration:.0f} секунд ({duration/60:.1f} минут)")
+        logger.info(f"📊 Тикеров обработано: {self.stats['tickers_processed']}")
+        logger.info(f"🕯  Свечей загружено: {self.stats['candles_loaded']:,}")
+        logger.info(f"🧮 Признаков рассчитано: {self.stats['features_calculated']:,}")
+        
+        if self.stats['errors']:
+            logger.warning(f"⚠️  Ошибок: {len(self.stats['errors'])}")
+            for error in self.stats['errors'][:5]:
+                logger.warning(f"   • {error}")
+        
+        logger.info("="*80)
+        
+        # Проверяем результат
+        await self._print_database_stats()
+    
+    async def _download_index(self, client: MOEXClient, years: int):
+        """Загрузить индекс IMOEX"""
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365 * years)
+        
+        logger.info(f"📅 Загружаю IMOEX с {start_date.date()} по {end_date.date()}")
+        
+        df = await client.get_index_data(start_date, end_date)
+        
+        if df.empty:
+            logger.error("❌ Не удалось загрузить индекс IMOEX")
+            self.stats['errors'].append("IMOEX: не удалось загрузить данные")
+            return
+        
+        # Сохраняем в БД
+        with get_db() as db:
+            saved = 0
+            
+            for _, row in df.iterrows():
+                # Проверяем, нет ли уже такой свечи
+                existing = db.query(Candle).filter(
+                    Candle.ticker == 'IMOEX',
+                    Candle.timestamp == row['timestamp']
+                ).first()
+                
+                if existing:
+                    continue
+                
+                candle = Candle(
+                    ticker='IMOEX',
+                    timeframe='15min',
+                    timestamp=row['timestamp'],
+                    open=float(row['open']),
+                    high=float(row['high']),
+                    low=float(row['low']),
+                    close=float(row['close']),
+                    volume=float(row['volume'])
+                )
+                db.add(candle)
+                saved += 1
+                
+                # Также сохраняем контекст рынка
+                price_change = ((row['close'] - row['open']) / row['open']) * 100
+                
+                context = MarketContext(
+                    timestamp=row['timestamp'],
+                    imoex_price=float(row['close']),
+                    imoex_change=float(price_change),
+                    imoex_volume=float(row['volume'])
+                )
+                db.add(context)
+            
+            db.commit()
+        
+        self.stats['candles_loaded'] += saved
+        self.stats['tickers_processed'] += 1
+        
+        logger.info(f"✅ IMOEX: {saved:,} свечей загружено")
+        logger.info(f"📅 Период: {df['timestamp'].min()} -> {df['timestamp'].max()}")
+    
+    async def _download_all_tickers(self, client: MOEXClient, tickers: list, years: int):
+        """Загрузить свечи всех тикеров"""
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365 * years)
+        
+        logger.info(f"📅 Период загрузки: {start_date.date()} -> {end_date.date()}")
+        logger.info(f"🕐 Таймфрейм: 15 минут")
+        print()
+        
+        success_count = 0
+        
+        # Прогресс-бар
+        with tqdm(total=len(tickers), desc="📥 Загрузка", unit="тикер") as pbar:
+            for ticker in tickers:
+                try:
+                    # Загружаем данные
+                    df = await client.get_candles(
+                        ticker,
+                        interval=15,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if df.empty:
+                        pbar.write(f"⚠️  {ticker}: нет данных")
+                        self.stats['errors'].append(f"{ticker}: нет данных")
+                        pbar.update(1)
+                        continue
+                    
+                    # Сохраняем в БД
+                    with get_db() as db:
+                        saved = 0
+                        
+                        for _, row in df.iterrows():
+                            # Проверяем дубликаты
+                            existing = db.query(Candle).filter(
+                                Candle.ticker == ticker,
+                                Candle.timestamp == row['timestamp']
+                            ).first()
+                            
+                            if existing:
+                                continue
+                            
+                            candle = Candle(
+                                ticker=ticker,
+                                timeframe='15min',
+                                timestamp=row['timestamp'],
+                                open=float(row['open']),
+                                high=float(row['high']),
+                                low=float(row['low']),
+                                close=float(row['close']),
+                                volume=float(row['volume'])
+                            )
+                            db.add(candle)
+                            saved += 1
+                        
+                        db.commit()
+                    
+                    self.stats['candles_loaded'] += saved
+                    self.stats['tickers_processed'] += 1
+                    success_count += 1
+                    
+                    pbar.write(f"✅ {ticker}: {saved:,} свечей")
+                    
+                    # Rate limiting
+                    await asyncio.sleep(0.1)
+                
+                except Exception as e:
+                    pbar.write(f"❌ {ticker}: {str(e)}")
+                    self.stats['errors'].append(f"{ticker}: {str(e)}")
+                
+                pbar.update(1)
+        
+        logger.info(f"\n✅ Успешно загружено: {success_count}/{len(tickers)} тикеров")
+    
+    async def _calculate_features(self, tickers: list):
+        """Рассчитать технические индикаторы"""
+        
+        logger.info(f"🧮 Рассчитываю индикаторы для {len(tickers)} тикеров...")
+        logger.info("📊 Индикаторы: EMA(20,50,200), RSI, MACD, BB, ATR, ADX, VWAP")
+        print()
+        
+        with tqdm(total=len(tickers), desc="🧮 Расчет", unit="тикер") as pbar:
+            for ticker in tickers:
+                try:
+                    # Загружаем свечи из БД
+                    with get_db() as db:
+                        candles = db.query(Candle).filter(
+                            Candle.ticker == ticker
+                        ).order_by(Candle.timestamp).all()
+                        
+                        if not candles or len(candles) < 200:
+                            pbar.write(f"⚠️  {ticker}: недостаточно данных ({len(candles)} свечей)")
+                            pbar.update(1)
+                            continue
+                        
+                        # Преобразуем в DataFrame
+                        df = pd.DataFrame([{
+                            'timestamp': c.timestamp,
+                            'open': c.open,
+                            'high': c.high,
+                            'low': c.low,
+                            'close': c.close,
+                            'volume': c.volume,
+                            'candle_id': c.id
+                        } for c in candles])
+                        
+                        # Рассчитываем признаки
+                        df_features = self.feature_engine.calculate_features(df)
+                        
+                        # Сохраняем в БД
+                        saved = 0
+                        
+                        for _, row in df_features.iterrows():
+                            if pd.isna(row.get('timestamp')):
+                                continue
+                            
+                            # Проверяем дубликаты
+                            existing = db.query(Feature).filter(
+                                Feature.ticker == ticker,
+                                Feature.timestamp == row['timestamp']
+                            ).first()
+                            
+                            if existing:
+                                continue
+                            
+                            feature = Feature(
+                                candle_id=row.get('candle_id'),
+                                ticker=ticker,
+                                timestamp=row['timestamp'],
+                                price_change_1=self._safe_float(row.get('price_change_1')),
+                                price_change_3=self._safe_float(row.get('price_change_3')),
+                                price_change_5=self._safe_float(row.get('price_change_5')),
+                                price_change_10=self._safe_float(row.get('price_change_10')),
+                                price_change_15=self._safe_float(row.get('price_change_15')),
+                                price_change_30=self._safe_float(row.get('price_change_30')),
+                                price_change_60=self._safe_float(row.get('price_change_60')),
+                                acceleration=self._safe_float(row.get('acceleration')),
+                                distance_to_high=self._safe_float(row.get('distance_to_high')),
+                                distance_to_low=self._safe_float(row.get('distance_to_low')),
+                                body_size=self._safe_float(row.get('body_size')),
+                                upper_shadow=self._safe_float(row.get('upper_shadow')),
+                                lower_shadow=self._safe_float(row.get('lower_shadow')),
+                                body_to_range=self._safe_float(row.get('body_to_range')),
+                                green_streak=self._safe_int(row.get('green_streak')),
+                                red_streak=self._safe_int(row.get('red_streak')),
+                                is_doji=self._safe_int(row.get('is_doji')),
+                                is_hammer=self._safe_int(row.get('is_hammer')),
+                                is_engulfing=self._safe_int(row.get('is_engulfing')),
+                                is_inside_bar=self._safe_int(row.get('is_inside_bar')),
+                                is_outside_bar=self._safe_int(row.get('is_outside_bar')),
+                                volume=self._safe_float(row.get('volume')),
+                                avg_volume_20=self._safe_float(row.get('avg_volume_20')),
+                                relative_volume=self._safe_float(row.get('relative_volume')),
+                                volume_spike=self._safe_int(row.get('volume_spike')),
+                                atr=self._safe_float(row.get('atr')),
+                                candle_range=self._safe_float(row.get('candle_range')),
+                                volatility_change=self._safe_float(row.get('volatility_change')),
+                                ema_20=self._safe_float(row.get('ema_20')),
+                                ema_50=self._safe_float(row.get('ema_50')),
+                                ema_200=self._safe_float(row.get('ema_200')),
+                                rsi=self._safe_float(row.get('rsi')),
+                                macd=self._safe_float(row.get('macd')),
+                                macd_signal=self._safe_float(row.get('macd_signal')),
+                                macd_hist=self._safe_float(row.get('macd_hist')),
+                                bb_upper=self._safe_float(row.get('bb_upper')),
+                                bb_middle=self._safe_float(row.get('bb_middle')),
+                                bb_lower=self._safe_float(row.get('bb_lower')),
+                                adx=self._safe_float(row.get('adx')),
+                                vwap=self._safe_float(row.get('vwap'))
+                            )
+                            db.add(feature)
+                            saved += 1
+                        
+                        db.commit()
+                        
+                        self.stats['features_calculated'] += saved
+                        pbar.write(f"✅ {ticker}: {saved:,} признаков")
+                
+                except Exception as e:
+                    pbar.write(f"❌ {ticker}: {str(e)}")
+                    self.stats['errors'].append(f"{ticker} (features): {str(e)}")
+                
+                pbar.update(1)
+    
+    @staticmethod
+    def _safe_float(value):
+        """Безопасное преобразование в float"""
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except:
+            return None
+    
+    @staticmethod
+    def _safe_int(value):
+        """Безопасное преобразование в int"""
+        if value is None or pd.isna(value):
+            return 0
+        try:
+            return int(value)
+        except:
+            return 0
+    
+    async def _print_database_stats(self):
+        """Вывести статистику БД"""
+        
+        with get_db() as db:
+            candles_count = db.query(Candle).count()
+            features_count = db.query(Feature).count()
+            tickers_count = db.query(Candle.ticker).distinct().count()
+            
+            # Период данных
+            first_candle = db.query(Candle).order_by(Candle.timestamp).first()
+            last_candle = db.query(Candle).order_by(Candle.timestamp.desc()).first()
+            
+            logger.info("\n" + "="*80)
+            logger.info("📊 СТАТИСТИКА БАЗЫ ДАННЫХ")
+            logger.info("="*80)
+            logger.info(f"📈 Тикеров: {tickers_count}")
+            logger.info(f"🕯  Свечей: {candles_count:,}")
+            logger.info(f"🧮 Признаков: {features_count:,}")
+            
+            if first_candle and last_candle:
+                logger.info(f"📅 Период: {first_candle.timestamp.date()} -> {last_candle.timestamp.date()}")
+                days = (last_candle.timestamp - first_candle.timestamp).days
+                logger.info(f"📆 Дней: {days}")
+            
+            logger.info("="*80)
+
+
+async def main():
+    """Главная функция"""
+    
+    print("\n" + "="*80)
+    print("🚀 INVEST AI - ЗАГРУЗКА ДАННЫХ MOEX")
+    print("="*80)
+    print("📊 Источник: MOEX ISS API")
+    print("🎯 Цель: Загрузить топ-100 акций IMOEX за 2 года")
+    print("⏱  Примерное время: 15-30 минут")
+    print("="*80 + "\n")
+    
+    input("Нажмите Enter для начала загрузки...")
+    print()
+    
+    # Инициализируем БД
+    logger.info("📦 Инициализация базы данных...")
+    init_db()
+    logger.info("✅ База данных готова\n")
+    
+    # Запускаем загрузку
+    downloader = MOEXDataDownloader()
+    await downloader.download_all(years=2, max_tickers=100)
+    
+    print("\n" + "="*80)
+    print("✅ ГОТОВО! Данные загружены и готовы к анализу")
+    print("="*80)
+    print("\n💡 Следующий шаг: запустите поиск закономерностей:")
+    print("   python scripts/find_patterns.py")
+    print()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Загрузка прервана пользователем")
+    except Exception as e:
+        print(f"\n\n❌ Критическая ошибка: {e}")
+        raise
+📄 Файл: scripts/find_patterns.py
+
+
+"""
+Скрипт поиска закономерностей на загруженных данных
+"""
+import asyncio
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from research.research_runner import ResearchRunner
+from database.connection import get_db
+from database.models import Candle, Pattern
+from utils.logger import logger
+
+
+async def main():
+    """Запуск поиска закономерностей"""
+    
+    print("\n" + "="*80)
+    print("🧠 INVEST AI - ПОИСК ЗАКОНОМЕРНОСТЕЙ")
+    print("="*80)
+    
+    # Проверяем наличие данных
+    with get_db() as db:
+        candles_count = db.query(Candle).count()
+        tickers_count = db.query(Candle.ticker).distinct().count()
+    
+    if candles_count == 0:
+        print("❌ В базе данных нет свечей!")
+        print("💡 Сначала запустите: python scripts/download_moex_data.py")
+        return
+    
+    print(f"📊 Данных в БД:")
+    print(f"   • Тикеров: {tickers_count}")
+    print(f"   • Свечей: {candles_count:,}")
+    print("="*80 + "\n")
+    
+    input("Нажмите Enter для начала поиска...")
+    print()
+    
+    # Запускаем исследование
+    runner = ResearchRunner()
+    stats = await runner.run_full_research()
+    
+    # Итоги
+    print("\n" + "="*80)
+    print("✅ ПОИСК ЗАКОНОМЕРНОСТЕЙ ЗАВЕРШЕН!")
+    print("="*80)
+    print(f"📊 Тикеров проанализировано: {stats.get('tickers_analyzed', 0)}")
+    print(f"🕯  Свечей обработано: {stats.get('candles_analyzed', 0):,}")
+    print(f("🔍 Закономерностей найдено: {stats.get('patterns_found', 0)}")
+    print("="*80)
+    
+    # Топ-5 паттернов
+    with get_db() as db:
+        top_patterns = db.query(Pattern).filter(
+            Pattern.is_active == 1
+        ).order_by(
+            Pattern.success_rate.desc()
+        ).limit(5).all()
+        
+        if top_patterns:
+            print("\n🏆 ТОП-5 ЛУЧШИХ ЗАКОНОМЕРНОСТЕЙ:")
+            print("-"*80)
+            
+            for i, p in enumerate(top_patterns, 1):
+                print(f"\n#{i} Паттерн #{p.id}")
+                print(f"   Тикер: {p.ticker}")
+                print(f"   Win Rate: {p.success_rate:.1f}%")
+                print(f"   Profit Factor: {p.profit_factor:.2f}")
+                print(f"   Наблюдений: {p.occurrences}")
+                print(f("   Средняя прибыль: {p.avg_profit:+.2f}%")
+    
+    print("\n" + "="*80)
+    print("💡 Теперь можете запустить Telegram бота:")
+    print("   python main.py")
+    print("="*80 + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Поиск прерван пользователем")
+    except Exception as e:
+        print(f"\n\n❌ Ошибка: {e}")
+        raise
