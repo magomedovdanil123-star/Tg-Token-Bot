@@ -72,6 +72,9 @@ type StockAnalogStat = {
   cases: number;
   upCases: number;
   downCases: number;
+  average1h: number | null;
+  average3h: number | null;
+  average6h: number | null;
   average5d: number | null;
   averageUp5d: number | null;
   averageDown5d: number | null;
@@ -733,6 +736,14 @@ function buildStockStats(
       const results = items
         .map((item) => item.result5d)
         .filter((value): value is number => value !== null && Number.isFinite(value));
+      const averageHorizon = (values: Array<number | null>) => {
+        const valid = values.filter(
+          (value): value is number => value !== null && Number.isFinite(value),
+        );
+        return valid.length
+          ? valid.reduce((sum, value) => sum + value, 0) / valid.length
+          : null;
+      };
       const upCases = results.filter((value) => value > 0).length;
       const downCases = results.filter((value) => value < 0).length;
       const average5d = results.length
@@ -768,6 +779,9 @@ function buildStockStats(
         cases: results.length,
         upCases,
         downCases,
+        average1h: averageHorizon(items.map((item) => item.result1h)),
+        average3h: averageHorizon(items.map((item) => item.result3h)),
+        average6h: averageHorizon(items.map((item) => item.result6h)),
         average5d,
         averageUp5d,
         averageDown5d,
@@ -853,6 +867,9 @@ function formatCandidate(
     `${direction === "LONG" ? "Ростов" : "Падений"}: ${direction === "LONG" ? stock.upCases : stock.downCases}`,
     `Вероятность ${direction}: ${formatNumber(stockProbability(stock, direction), 0)}%`,
     `Среднее движение: ${signedNumber(stock.average5d)}%`,
+    `Изменение через 1 час: ${signedNumber(stock.average1h)}%`,
+    `Изменение через 3 часа: ${signedNumber(stock.average3h)}%`,
+    `Изменение через 6 часов: ${signedNumber(stock.average6h)}%`,
     `Текущая цена / вход: ${formatNumber(levels.entry)}`,
     `Take profit: ${formatNumber(levels.takeProfit)} (${signedNumber(levels.tpPercent)}%)`,
     `Stop loss: ${formatNumber(levels.stopLoss)} (${signedNumber(levels.slPercent)}%)`,
