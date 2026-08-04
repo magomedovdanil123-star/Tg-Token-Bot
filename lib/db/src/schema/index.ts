@@ -438,6 +438,17 @@ export const featureCombinations = pgTable(
     maxDrawdown: doublePrecision("max_drawdown"),
     holdingMinutes: integer("holding_minutes"),
     direction: varchar("direction", { length: 16 }),
+    bestTakeProfit: doublePrecision("best_take_profit"),
+    bestStopLoss: doublePrecision("best_stop_loss"),
+    bestHoldingMinutes: integer("best_holding_minutes"),
+    trainWinRate: doublePrecision("train_win_rate"),
+    testWinRate: doublePrecision("test_win_rate"),
+    trainExpectedValue: doublePrecision("train_expected_value"),
+    testExpectedValue: doublePrecision("test_expected_value"),
+    testProfitFactor: doublePrecision("test_profit_factor"),
+    statisticalSignificance: boolean("statistical_significance")
+      .notNull()
+      .default(false),
     discoveredAt: timestamp("discovered_at", {
       withTimezone: true,
       mode: "date",
@@ -515,6 +526,17 @@ export const strategyResults = pgTable(
     averageProfit: doublePrecision("average_profit"),
     averageLoss: doublePrecision("average_loss"),
     bestTimeframe: varchar("best_timeframe", { length: 16 }),
+    bestTakeProfit: doublePrecision("best_take_profit"),
+    bestStopLoss: doublePrecision("best_stop_loss"),
+    bestHoldingMinutes: integer("best_holding_minutes"),
+    trainWinRate: doublePrecision("train_win_rate"),
+    testWinRate: doublePrecision("test_win_rate"),
+    trainExpectedValue: doublePrecision("train_expected_value"),
+    testExpectedValue: doublePrecision("test_expected_value"),
+    testProfitFactor: doublePrecision("test_profit_factor"),
+    statisticalSignificance: boolean("statistical_significance")
+      .notNull()
+      .default(false),
     tradesCount: integer("trades_count").notNull().default(0),
     evaluatedAt: timestamp("evaluated_at", {
       withTimezone: true,

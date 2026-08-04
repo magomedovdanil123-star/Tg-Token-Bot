@@ -33,7 +33,9 @@ async function main() {
   const maxTickers = arg("max-tickers", "100");
   const skipImport = hasFlag("skip-import");
   const skipContext = hasFlag("skip-context");
-  const candidateLimit = arg("candidate-limit", "10");
+  const maxResults = arg("max-results", "100");
+  const maxEventsPerTicker = arg("max-events-per-ticker", "1000");
+  const maxCombinationSize = arg("max-combination-size", "2");
 
   const steps: Step[] = [];
   if (!skipImport) {
@@ -54,22 +56,16 @@ async function main() {
     });
   }
 
-  const candidateCount = Number(candidateLimit);
-  if (!Number.isInteger(candidateCount) || candidateCount < 1) {
-    throw new Error("--candidate-limit должен быть положительным числом");
-  }
-  for (let candidate = 1; candidate <= candidateCount; candidate += 1) {
-    steps.push({
-      name: `Discovery пакет ${candidate}/${candidateCount}`,
-      args: [
-        "./src/research-discover.ts",
-        `--candidate-limit=${candidateCount}`,
-        `--candidate-start=${candidate}`,
-        `--candidate-end=${candidate}`,
-        "--max-results=100",
-      ],
-    });
-  }
+  steps.push({
+    name: "Исследовательское ядро комбинаций факторов",
+    args: [
+      "./src/research-discover.ts",
+      `--max-results=${maxResults}`,
+      `--max-events-per-ticker=${maxEventsPerTicker}`,
+      `--max-combination-size=${maxCombinationSize}`,
+      "--max-active-factors=6",
+    ],
+  });
   steps.push({
     name: "Обновление свечных паттернов",
     args: ["./src/discover-candle-patterns.ts"],

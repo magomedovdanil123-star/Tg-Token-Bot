@@ -36,13 +36,32 @@ type TelegramResponse<T> = {
 type LatestFeature = {
   timestamp: Date;
   close: number;
+  volume: number | null;
+  avgVolume20: number | null;
   ema20: number | null;
   ema50: number | null;
+  ema100: number | null;
+  ema200: number | null;
   rsi: number | null;
   macdHist: number | null;
   relativeVolume: number | null;
   atr: number | null;
+  vwap: number | null;
   bbMiddle: number | null;
+  bbUpper: number | null;
+  bbLower: number | null;
+  bbWidth: number | null;
+  adx: number | null;
+  acceleration: number | null;
+  priceChange3: number | null;
+  priceChange5: number | null;
+  bodySize: number | null;
+  bodyToRange: number | null;
+  upperShadow: number | null;
+  lowerShadow: number | null;
+  greenStreak: number | null;
+  redStreak: number | null;
+  candleRange: number | null;
   historicalVolatility: number | null;
   isDoji: number | null;
   isHammer: number | null;
@@ -70,6 +89,37 @@ type Combination = {
   holdingMinutes: number | null;
   confidenceLow: number | null;
   confidenceHigh: number | null;
+  bestTakeProfit: number | null;
+  bestStopLoss: number | null;
+  bestHoldingMinutes: number | null;
+};
+type FactorThresholds = {
+  rsiLow: number | null;
+  rsiHigh: number | null;
+  adxLow: number | null;
+  adxHigh: number | null;
+  atrPctLow: number | null;
+  atrPctHigh: number | null;
+  bbWidthLow: number | null;
+  bbWidthHigh: number | null;
+  volumeLow: number | null;
+  volumeHigh: number | null;
+  relativeVolumeLow: number | null;
+  relativeVolumeHigh: number | null;
+  accelerationLow: number | null;
+  accelerationHigh: number | null;
+  speedLow: number | null;
+  speedHigh: number | null;
+  rangePctLow: number | null;
+  rangePctHigh: number | null;
+  bodyPctLow: number | null;
+  bodyPctHigh: number | null;
+  upperShadowLow: number | null;
+  upperShadowHigh: number | null;
+  lowerShadowLow: number | null;
+  lowerShadowHigh: number | null;
+  volatilityLow: number | null;
+  volatilityHigh: number | null;
 };
 type CandlePattern = {
   id: number;
@@ -89,6 +139,7 @@ type MarketStructure = {
 type SignalContext = {
   combinations: Combination[];
   volatilityMedian: number | null;
+  thresholdsByTicker: Map<string, FactorThresholds>;
   patternsByTicker: Map<string, CandlePattern[]>;
   levelsByTicker: Map<string, { levelType: string; price: number }[]>;
   correlationsByTicker: Map<
@@ -194,13 +245,32 @@ async function getLatestFeature(ticker: string): Promise<LatestFeature | null> {
     .select({
       timestamp: candles.timestamp,
       close: candles.close,
+      volume: features.volume,
+      avgVolume20: features.avgVolume20,
       ema20: features.ema20,
       ema50: features.ema50,
+      ema100: features.ema100,
+      ema200: features.ema200,
       rsi: features.rsi,
       macdHist: features.macdHist,
       relativeVolume: features.relativeVolume,
       atr: features.atr,
+      vwap: features.vwap,
       bbMiddle: features.bbMiddle,
+      bbUpper: features.bbUpper,
+      bbLower: features.bbLower,
+      bbWidth: features.bbWidth,
+      adx: features.adx,
+      acceleration: features.acceleration,
+      priceChange3: features.priceChange3,
+      priceChange5: features.priceChange5,
+      bodySize: features.bodySize,
+      bodyToRange: features.bodyToRange,
+      upperShadow: features.upperShadow,
+      lowerShadow: features.lowerShadow,
+      greenStreak: features.greenStreak,
+      redStreak: features.redStreak,
+      candleRange: features.candleRange,
       historicalVolatility: features.historicalVolatility,
       isDoji: features.isDoji,
       isHammer: features.isHammer,
@@ -248,13 +318,32 @@ async function getTopRows() {
       t.secid AS ticker,
       f.timestamp,
       c.close,
+      f.volume,
+      f.avg_volume_20 AS "avgVolume20",
       f.ema_20 AS "ema20",
       f.ema_50 AS "ema50",
+      f.ema_100 AS "ema100",
+      f.ema_200 AS "ema200",
       f.rsi,
       f.macd_hist AS "macdHist",
       f.relative_volume AS "relativeVolume",
       f.atr,
+      f.vwap,
       f.bb_middle AS "bbMiddle",
+      f.bb_upper AS "bbUpper",
+      f.bb_lower AS "bbLower",
+      f.bb_width AS "bbWidth",
+      f.adx,
+      f.acceleration,
+      f.price_change_3 AS "priceChange3",
+      f.price_change_5 AS "priceChange5",
+      f.body_size AS "bodySize",
+      f.body_to_range AS "bodyToRange",
+      f.upper_shadow AS "upperShadow",
+      f.lower_shadow AS "lowerShadow",
+      f.green_streak AS "greenStreak",
+      f.red_streak AS "redStreak",
+      f.candle_range AS "candleRange",
       f.historical_volatility AS "historicalVolatility",
       f.is_doji AS "isDoji",
       f.is_hammer AS "isHammer",
@@ -266,13 +355,32 @@ async function getTopRows() {
       SELECT
         f.timestamp,
         f.candle_id,
+        f.volume,
+        f.avg_volume_20,
         f.ema_20,
         f.ema_50,
+        f.ema_100,
+        f.ema_200,
         f.rsi,
         f.macd_hist,
         f.relative_volume,
         f.atr,
+        f.vwap,
         f.bb_middle,
+        f.bb_upper,
+        f.bb_lower,
+        f.bb_width,
+        f.adx,
+        f.acceleration,
+        f.price_change_3,
+        f.price_change_5,
+        f.body_size,
+        f.body_to_range,
+        f.upper_shadow,
+        f.lower_shadow,
+        f.green_streak,
+        f.red_streak,
+        f.candle_range,
         f.historical_volatility,
         f.is_doji,
         f.is_hammer,
@@ -306,9 +414,17 @@ async function getValidatedCombinations(): Promise<Combination[]> {
       holdingMinutes: featureCombinations.holdingMinutes,
       confidenceLow: featureCombinations.confidenceLow,
       confidenceHigh: featureCombinations.confidenceHigh,
+      bestTakeProfit: featureCombinations.bestTakeProfit,
+      bestStopLoss: featureCombinations.bestStopLoss,
+      bestHoldingMinutes: featureCombinations.bestHoldingMinutes,
     })
     .from(featureCombinations)
-    .where(eq(featureCombinations.isActive, true))
+    .where(
+      and(
+        eq(featureCombinations.isActive, true),
+        sql`${featureCombinations.name} LIKE 'auto-engine:%'`,
+      ),
+    )
     .orderBy(desc(featureCombinations.expectedValue));
   return result as Combination[];
 }
@@ -316,39 +432,173 @@ async function getValidatedCombinations(): Promise<Combination[]> {
 function matchesCombination(
   feature: LatestFeature,
   combination: Combination,
-  volatilityMedian: number | null,
+  thresholds: FactorThresholds | undefined,
 ) {
+  if (!thresholds) return false;
+  const percentage = (value: number | null, base: number | null) =>
+    value !== null && base !== null && Number.isFinite(value) && Number.isFinite(base) && base !== 0
+      ? (value / base) * 100
+      : null;
+  const between = (value: number | null, low: number | null, high: number | null) =>
+    value !== null && low !== null && high !== null && value >= low && value <= high;
   return combination.conditions.every((condition) => {
     const key = String(condition.key ?? "");
     switch (key) {
-      case "rsi_oversold":
-        return feature.rsi !== null && feature.rsi < 30;
-      case "rsi_overbought":
-        return feature.rsi !== null && feature.rsi > 70;
-      case "relative_volume_spike":
-        return feature.relativeVolume !== null && feature.relativeVolume >= 1.5;
-      case "ema_bullish":
+      case "price_above_ema20":
+        return feature.ema20 !== null && feature.close > feature.ema20;
+      case "price_below_ema20":
+        return feature.ema20 !== null && feature.close < feature.ema20;
+      case "ema20_above_ema50":
         return feature.ema20 !== null && feature.ema50 !== null && feature.ema20 > feature.ema50;
-      case "ema_bearish":
+      case "ema20_below_ema50":
         return feature.ema20 !== null && feature.ema50 !== null && feature.ema20 < feature.ema50;
+      case "ema50_above_ema200":
+        return feature.ema50 !== null && feature.ema200 !== null && feature.ema50 > feature.ema200;
+      case "ema50_below_ema200":
+        return feature.ema50 !== null && feature.ema200 !== null && feature.ema50 < feature.ema200;
+      case "rsi_low":
+        return feature.rsi !== null && thresholds.rsiLow !== null && feature.rsi <= thresholds.rsiLow;
+      case "rsi_high":
+        return feature.rsi !== null && thresholds.rsiHigh !== null && feature.rsi >= thresholds.rsiHigh;
       case "macd_positive":
         return feature.macdHist !== null && feature.macdHist > 0;
       case "macd_negative":
         return feature.macdHist !== null && feature.macdHist < 0;
-      case "bb_lower_half":
-        return feature.bbMiddle !== null && feature.close < feature.bbMiddle;
-      case "bb_upper_half":
-        return feature.bbMiddle !== null && feature.close > feature.bbMiddle;
-      case "high_volatility":
-        return (
-          feature.historicalVolatility !== null &&
-          volatilityMedian !== null &&
-          feature.historicalVolatility >= volatilityMedian
-        );
+      case "adx_high":
+        return feature.adx !== null && thresholds.adxHigh !== null && feature.adx >= thresholds.adxHigh;
+      case "adx_low":
+        return feature.adx !== null && thresholds.adxLow !== null && feature.adx <= thresholds.adxLow;
+      case "atr_high": {
+        const value = percentage(feature.atr, feature.close);
+        return value !== null && thresholds.atrPctHigh !== null && value >= thresholds.atrPctHigh;
+      }
+      case "atr_low": {
+        const value = percentage(feature.atr, feature.close);
+        return value !== null && thresholds.atrPctLow !== null && value <= thresholds.atrPctLow;
+      }
+      case "above_vwap":
+        return feature.vwap !== null && feature.close > feature.vwap;
+      case "below_vwap":
+        return feature.vwap !== null && feature.close < feature.vwap;
+      case "bollinger_low":
+        return feature.bbLower !== null && feature.close <= feature.bbLower;
+      case "bollinger_high":
+        return feature.bbUpper !== null && feature.close >= feature.bbUpper;
+      case "bollinger_squeeze":
+        return feature.bbWidth !== null && thresholds.bbWidthLow !== null && feature.bbWidth <= thresholds.bbWidthLow;
+      case "bollinger_expansion":
+        return feature.bbWidth !== null && thresholds.bbWidthHigh !== null && feature.bbWidth >= thresholds.bbWidthHigh;
+      case "volume_high":
+        return feature.volume !== null && thresholds.volumeHigh !== null && feature.volume >= thresholds.volumeHigh;
+      case "relative_volume_high":
+        return feature.relativeVolume !== null && thresholds.relativeVolumeHigh !== null && feature.relativeVolume >= thresholds.relativeVolumeHigh;
+      case "relative_volume_low":
+        return feature.relativeVolume !== null && thresholds.relativeVolumeLow !== null && feature.relativeVolume <= thresholds.relativeVolumeLow;
+      case "acceleration_high":
+        return feature.acceleration !== null && thresholds.accelerationHigh !== null && feature.acceleration >= thresholds.accelerationHigh;
+      case "acceleration_low":
+        return feature.acceleration !== null && thresholds.accelerationLow !== null && feature.acceleration <= thresholds.accelerationLow;
+      case "speed_high": {
+        const value = feature.priceChange5 ?? feature.priceChange3;
+        return value !== null && thresholds.speedHigh !== null && value >= thresholds.speedHigh;
+      }
+      case "speed_low": {
+        const value = feature.priceChange5 ?? feature.priceChange3;
+        return value !== null && thresholds.speedLow !== null && value <= thresholds.speedLow;
+      }
+      case "large_candle": {
+        const value = percentage(feature.candleRange, feature.close);
+        return value !== null && thresholds.rangePctHigh !== null && value >= thresholds.rangePctHigh;
+      }
+      case "small_candle": {
+        const value = percentage(feature.candleRange, feature.close);
+        return value !== null && thresholds.rangePctLow !== null && value <= thresholds.rangePctLow;
+      }
+      case "large_body": {
+        const value = percentage(feature.bodySize, feature.close);
+        return value !== null && thresholds.bodyPctHigh !== null && value >= thresholds.bodyPctHigh;
+      }
+      case "upper_shadow_high": {
+        const value = percentage(feature.upperShadow, feature.candleRange);
+        return value !== null && thresholds.upperShadowHigh !== null && value >= thresholds.upperShadowHigh;
+      }
+      case "lower_shadow_high": {
+        const value = percentage(feature.lowerShadow, feature.candleRange);
+        return value !== null && thresholds.lowerShadowHigh !== null && value >= thresholds.lowerShadowHigh;
+      }
+      case "green_series":
+        return (feature.greenStreak ?? 0) >= 3;
+      case "red_series":
+        return (feature.redStreak ?? 0) >= 3;
+      case "volatility_high":
+        return feature.historicalVolatility !== null && thresholds.volatilityHigh !== null && feature.historicalVolatility >= thresholds.volatilityHigh;
+      case "volatility_low":
+        return feature.historicalVolatility !== null && thresholds.volatilityLow !== null && feature.historicalVolatility <= thresholds.volatilityLow;
       default:
         return false;
     }
   });
+}
+
+function numberOrNull(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function getFactorThresholds(): Promise<Map<string, FactorThresholds>> {
+  const result = await db.execute(sql`
+    SELECT f.ticker,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.rsi) FILTER (WHERE f.rsi IS NOT NULL) AS rsi_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.rsi) FILTER (WHERE f.rsi IS NOT NULL) AS rsi_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.adx) FILTER (WHERE f.adx IS NOT NULL) AS adx_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.adx) FILTER (WHERE f.adx IS NOT NULL) AS adx_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.atr / NULLIF(c.close, 0) * 100) FILTER (WHERE f.atr IS NOT NULL AND c.close <> 0) AS atr_pct_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.atr / NULLIF(c.close, 0) * 100) FILTER (WHERE f.atr IS NOT NULL AND c.close <> 0) AS atr_pct_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.bb_width) FILTER (WHERE f.bb_width IS NOT NULL) AS bb_width_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.bb_width) FILTER (WHERE f.bb_width IS NOT NULL) AS bb_width_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.volume) FILTER (WHERE f.volume IS NOT NULL) AS volume_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.volume) FILTER (WHERE f.volume IS NOT NULL) AS volume_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.relative_volume) FILTER (WHERE f.relative_volume IS NOT NULL) AS relative_volume_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.relative_volume) FILTER (WHERE f.relative_volume IS NOT NULL) AS relative_volume_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.acceleration) FILTER (WHERE f.acceleration IS NOT NULL) AS acceleration_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.acceleration) FILTER (WHERE f.acceleration IS NOT NULL) AS acceleration_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY COALESCE(f.price_change_5, f.price_change_3)) FILTER (WHERE COALESCE(f.price_change_5, f.price_change_3) IS NOT NULL) AS speed_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY COALESCE(f.price_change_5, f.price_change_3)) FILTER (WHERE COALESCE(f.price_change_5, f.price_change_3) IS NOT NULL) AS speed_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.candle_range / NULLIF(c.close, 0) * 100) FILTER (WHERE f.candle_range IS NOT NULL AND c.close <> 0) AS range_pct_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.candle_range / NULLIF(c.close, 0) * 100) FILTER (WHERE f.candle_range IS NOT NULL AND c.close <> 0) AS range_pct_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.body_size / NULLIF(c.close, 0) * 100) FILTER (WHERE f.body_size IS NOT NULL AND c.close <> 0) AS body_pct_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.body_size / NULLIF(c.close, 0) * 100) FILTER (WHERE f.body_size IS NOT NULL AND c.close <> 0) AS body_pct_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.upper_shadow / NULLIF(f.candle_range, 0) * 100) FILTER (WHERE f.upper_shadow IS NOT NULL AND f.candle_range <> 0) AS upper_shadow_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.upper_shadow / NULLIF(f.candle_range, 0) * 100) FILTER (WHERE f.upper_shadow IS NOT NULL AND f.candle_range <> 0) AS upper_shadow_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.lower_shadow / NULLIF(f.candle_range, 0) * 100) FILTER (WHERE f.lower_shadow IS NOT NULL AND f.candle_range <> 0) AS lower_shadow_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.lower_shadow / NULLIF(f.candle_range, 0) * 100) FILTER (WHERE f.lower_shadow IS NOT NULL AND f.candle_range <> 0) AS lower_shadow_high,
+      percentile_cont(0.2) WITHIN GROUP (ORDER BY f.historical_volatility) FILTER (WHERE f.historical_volatility IS NOT NULL) AS volatility_low,
+      percentile_cont(0.8) WITHIN GROUP (ORDER BY f.historical_volatility) FILTER (WHERE f.historical_volatility IS NOT NULL) AS volatility_high
+    FROM features f
+    INNER JOIN candles c ON c.ticker = f.ticker AND c.timestamp = f.timestamp AND c.timeframe = ${TIMEFRAME}
+    INNER JOIN moex_tickers t ON t.secid = f.ticker AND t.is_active = true
+    GROUP BY f.ticker
+  `);
+  const thresholds = new Map<string, FactorThresholds>();
+  for (const row of result.rows) {
+    const value = (key: string) => numberOrNull((row as Record<string, unknown>)[key]);
+    thresholds.set(String((row as { ticker: string }).ticker), {
+      rsiLow: value("rsi_low"), rsiHigh: value("rsi_high"),
+      adxLow: value("adx_low"), adxHigh: value("adx_high"),
+      atrPctLow: value("atr_pct_low"), atrPctHigh: value("atr_pct_high"),
+      bbWidthLow: value("bb_width_low"), bbWidthHigh: value("bb_width_high"),
+      volumeLow: value("volume_low"), volumeHigh: value("volume_high"),
+      relativeVolumeLow: value("relative_volume_low"), relativeVolumeHigh: value("relative_volume_high"),
+      accelerationLow: value("acceleration_low"), accelerationHigh: value("acceleration_high"),
+      speedLow: value("speed_low"), speedHigh: value("speed_high"),
+      rangePctLow: value("range_pct_low"), rangePctHigh: value("range_pct_high"),
+      bodyPctLow: value("body_pct_low"), bodyPctHigh: value("body_pct_high"),
+      upperShadowLow: value("upper_shadow_low"), upperShadowHigh: value("upper_shadow_high"),
+      lowerShadowLow: value("lower_shadow_low"), lowerShadowHigh: value("lower_shadow_high"),
+      volatilityLow: value("volatility_low"), volatilityHigh: value("volatility_high"),
+    });
+  }
+  return thresholds;
 }
 
 function median(values: number[]) {
@@ -407,7 +657,7 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
   if (cachedSignalContext && cachedSignalContext.expiresAt > Date.now()) {
     return cachedSignalContext.value;
   }
-  const [combinations, patternRows, levelRows, correlationRows] =
+  const [combinations, patternRows, levelRows, correlationRows, thresholdsByTicker] =
     await Promise.all([
       getValidatedCombinations(),
       db
@@ -445,6 +695,7 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
             eq(assetCorrelations.timeframe, TIMEFRAME),
           ),
         ),
+      getFactorThresholds(),
     ]);
   const volatilityMedian =
     median(volatilityValues) ?? (await getVolatilityMedian());
@@ -477,6 +728,7 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
   const context = {
     combinations,
     volatilityMedian,
+    thresholdsByTicker,
     patternsByTicker,
     levelsByTicker,
     correlationsByTicker,
@@ -551,20 +803,17 @@ async function analyzeSignalWithContext(
   marketStructure: MarketStructure;
 }> {
   const combinations = context.combinations;
-  const volatilityMedian = context.volatilityMedian;
-  const candlePatterns = context.patternsByTicker.get(ticker) ?? [];
+  const thresholds = context.thresholdsByTicker.get(ticker);
   const marketStructure = marketStructureFromContext(
     ticker,
     feature.close,
     context,
   );
   const matched = combinations.filter((combination) =>
-    matchesCombination(feature, combination, volatilityMedian),
+    matchesCombination(feature, combination, thresholds),
   );
-  const matchedPatterns = candlePatterns.filter((pattern) =>
-    matchesCandlePattern(feature, pattern),
-  );
-  if (!matched.length && !matchedPatterns.length) {
+  const matchedPatterns: CandlePattern[] = [];
+  if (!matched.length) {
     return {
       direction: "HOLD" as SignalDirection,
       confidence: 50,
@@ -584,14 +833,8 @@ async function analyzeSignalWithContext(
   const sellEvidence = matched
     .filter((combination) => combination.direction === "SELL")
     .reduce((sum, combination) => sum + Math.max(combination.expectedValue ?? 0, 0), 0);
-  const buyPatternEvidence = matchedPatterns
-    .filter((pattern) => pattern.direction === "BUY")
-    .reduce((sum, pattern) => sum + Math.max((pattern.successRate ?? 0.5) - 0.5, 0), 0);
-  const sellPatternEvidence = matchedPatterns
-    .filter((pattern) => pattern.direction === "SELL")
-    .reduce((sum, pattern) => sum + Math.max((pattern.successRate ?? 0.5) - 0.5, 0), 0);
-  const totalBuyEvidence = buyEvidence + buyPatternEvidence;
-  const totalSellEvidence = sellEvidence + sellPatternEvidence;
+  const totalBuyEvidence = buyEvidence;
+  const totalSellEvidence = sellEvidence;
   const direction: SignalDirection =
     totalBuyEvidence === totalSellEvidence
       ? "HOLD"
@@ -601,29 +844,42 @@ async function analyzeSignalWithContext(
   const relevant = matched.filter((combination) => combination.direction === direction);
   const relevantPatterns = matchedPatterns.filter((pattern) => pattern.direction === direction);
   const best = relevant[0] ?? matched[0] ?? null;
-  const bestPattern = relevantPatterns[0];
   const confidence = Math.round(
     Math.max(
       50,
       Math.min(
         95,
-        ((best?.successRate ?? bestPattern?.successRate ?? 0.5) * 100 +
-          (best?.confidenceHigh ?? bestPattern?.successRate ?? 0.5) * 100) /
+        ((best?.successRate ?? 0.5) * 100 +
+          (best?.confidenceHigh ?? 0.5) * 100) /
           2,
       ),
     ),
   );
   const horizonMinutes = best?.holdingMinutes ?? 60;
-  const stopFactor = direction === "SELL" ? 1.01 : 0.99;
-  const targetFactor = direction === "SELL" ? 0.98 : 1.02;
+  const bestTakeProfit = best?.bestTakeProfit;
+  const bestStopLoss = best?.bestStopLoss;
+  const takeProfitPrice =
+    bestTakeProfit !== null && bestTakeProfit !== undefined
+      ? direction === "BUY"
+        ? feature.close * (1 + bestTakeProfit / 100)
+        : feature.close * (1 - bestTakeProfit / 100)
+      : null;
+  const stopLossPrice =
+    bestStopLoss !== null && bestStopLoss !== undefined
+      ? direction === "BUY"
+        ? feature.close * (1 - bestStopLoss / 100)
+        : feature.close * (1 + bestStopLoss / 100)
+      : null;
   const stop =
-    direction === "BUY"
-      ? marketStructure.support ?? feature.close * stopFactor
-      : marketStructure.resistance ?? feature.close * stopFactor;
+    stopLossPrice ??
+    (direction === "BUY"
+      ? marketStructure.support ?? feature.close * 0.99
+      : marketStructure.resistance ?? feature.close * 1.01);
   const target =
-    direction === "BUY"
-      ? marketStructure.resistance ?? feature.close * targetFactor
-      : marketStructure.support ?? feature.close * targetFactor;
+    takeProfitPrice ??
+    (direction === "BUY"
+      ? marketStructure.resistance ?? feature.close * 1.02
+      : marketStructure.support ?? feature.close * 0.98);
   const structureReasons = [
     marketStructure.support !== null
       ? `Поддержка: ${formatNumber(marketStructure.support)}`

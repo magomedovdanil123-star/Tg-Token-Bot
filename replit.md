@@ -15,10 +15,11 @@ Stores MOEX market candles, technical indicators, market context, and research r
 - `pnpm --filter @workspace/scripts run refresh-features` — recalculate and update all stored feature rows after schema/indicator changes
 - `pnpm --filter @workspace/scripts run refresh-features -- --features-start=45 --features-limit=20` — refresh a bounded ticker range
 - `pnpm --filter @workspace/scripts run discover-patterns` — discover statistically positive feature combinations and save strategies/backtests
+- `pnpm --filter @workspace/scripts run research-engine` — run factor-combination discovery with train/test validation and TP/SL optimization
 - `pnpm --filter @workspace/scripts run discover-patterns -- --candidate-start=1 --candidate-end=3` — run a bounded discovery package
 - `pnpm --filter @workspace/scripts run discover-candle-patterns` — discover candle models and save their historical outcomes
 - `pnpm --filter @workspace/scripts run refresh-levels-correlations` — refresh rolling support/resistance levels and IMOEX correlations
-- `pnpm --filter @workspace/scripts run research-refresh -- --skip-import --skip-context` — rerun Discovery packages and candle models without refetching MOEX data
+- `pnpm --filter @workspace/scripts run research-refresh -- --skip-import --skip-context` — rerun the factor research engine, candle models, levels, and correlations without refetching MOEX data
 - `pnpm --filter @workspace/scripts run research-refresh` — full update: MOEX candles, market context, feature Discovery, and candle models
 - `pnpm --filter @workspace/scripts run download-moex -- --years=1 --max-tickers=10` — run a smaller import
 - `pnpm --filter @workspace/scripts run download-moex -- --years=2 --start-rank=10 --max-tickers=10 --skip-context=true` — resume a chunk without reloading IMOEX

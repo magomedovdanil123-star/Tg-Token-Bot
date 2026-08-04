@@ -234,6 +234,57 @@ function rsiSeries(values: number[], period = 14): (number | undefined)[] {
   return output;
 }
 
+function adxSeries(
+  rows: { high: number; low: number; close: number }[],
+  period = 14,
+): (number | undefined)[] {
+  const output: (number | undefined)[] = Array.from({ length: rows.length });
+  if (rows.length <= period * 2) return output;
+
+  const trueRanges: number[] = [];
+  const positiveMoves: number[] = [];
+  const negativeMoves: number[] = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const previous = rows[index - 1];
+    if (!previous) {
+      trueRanges.push(rows[index].high - rows[index].low);
+      positiveMoves.push(0);
+      negativeMoves.push(0);
+      continue;
+    }
+    const upMove = rows[index].high - previous.high;
+    const downMove = previous.low - rows[index].low;
+    trueRanges.push(
+      Math.max(
+        rows[index].high - rows[index].low,
+        Math.abs(rows[index].high - previous.close),
+        Math.abs(rows[index].low - previous.close),
+      ),
+    );
+    positiveMoves.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    negativeMoves.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+
+  const dx: (number | undefined)[] = Array.from({ length: rows.length });
+  for (let index = period; index < rows.length; index += 1) {
+    const tr = average(trueRanges.slice(index - period + 1, index + 1));
+    const plus = average(positiveMoves.slice(index - period + 1, index + 1));
+    const minus = average(negativeMoves.slice(index - period + 1, index + 1));
+    if (!tr || plus === undefined || minus === undefined) continue;
+    const plusDi = (plus / tr) * 100;
+    const minusDi = (minus / tr) * 100;
+    const denominator = plusDi + minusDi;
+    dx[index] = denominator ? (Math.abs(plusDi - minusDi) / denominator) * 100 : 0;
+  }
+  for (let index = period * 2 - 1; index < rows.length; index += 1) {
+    const values = dx
+      .slice(index - period + 1, index + 1)
+      .filter((value): value is number => value !== undefined);
+    if (values.length === period) output[index] = average(values);
+  }
+  return output;
+}
+
 function featureRows(rows: (CandleRow & { id: number })[]) {
   const closes = rows.map((row) => row.close);
   const ema20Series = emaSeries(closes, 20);
@@ -259,6 +310,7 @@ function featureRows(rows: (CandleRow & { id: number })[]) {
     }
   }
   const rsiValues = rsiSeries(closes);
+  const adxValues = adxSeries(rows);
   const output = [];
   let greenStreak = 0;
   let redStreak = 0;
@@ -450,7 +502,7 @@ function featureRows(rows: (CandleRow & { id: number })[]) {
         middle === undefined || deviation === undefined || middle === 0
           ? undefined
           : (deviation * 4) / middle,
-      adx: undefined,
+      adx: adxValues[index],
       historicalVolatility:
         historicalVolatility === undefined
           ? undefined
@@ -633,6 +685,7 @@ async function main() {
     const featuresStart = integerArg("features-start", 0);
     const featuresLimit = integerArg("features-limit", 1000);
     const requestedTicker = arg("ticker", "").trim().toUpperCase();
+    const missingAdxOnly = arg("missing-adx-only", "false") === "true";
     const tickerRows = (
       await db
         .selectDistinct({ ticker: candles.ticker })
@@ -648,14 +701,32 @@ async function main() {
         )
         .orderBy(asc(candles.ticker))
     ).slice(featuresStart, featuresStart + featuresLimit);
+    const finalTickerRows = missingAdxOnly
+      ? (
+          await db.execute(sql`
+            SELECT DISTINCT c.ticker
+            FROM candles c
+            INNER JOIN moex_tickers t ON t.secid = c.ticker AND t.is_active = true
+            WHERE c.timeframe = ${TIMEFRAME}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM features f
+                WHERE f.ticker = c.ticker
+                  AND f.adx IS NOT NULL
+              )
+            ORDER BY c.ticker
+            LIMIT ${featuresLimit}
+          `)
+        ).rows.map((row) => ({ ticker: String((row as { ticker: string }).ticker) }))
+      : tickerRows;
     let refreshed = 0;
-    for (const { ticker } of tickerRows) {
+    for (const { ticker } of finalTickerRows) {
       const count = await calculateFeatures(ticker);
       refreshed += count;
       console.log(`${ticker}: ${count} признаков обновлено`);
     }
     console.log(
-      `Готово. Обновлено признаков: ${refreshed}. Диапазон тикеров: ${featuresStart}–${featuresStart + tickerRows.length - 1}`,
+      `Готово. Обновлено признаков: ${refreshed}. Обработано тикеров: ${finalTickerRows.length}`,
     );
     await pool.end();
     return;
