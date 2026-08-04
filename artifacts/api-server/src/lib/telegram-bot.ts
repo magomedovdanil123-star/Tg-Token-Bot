@@ -20,6 +20,7 @@ import { logger } from "./logger";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
+const MIN_TRADE_PERCENT = 0.3;
 const POLL_TIMEOUT_SECONDS = 25;
 const REFRESH_BUTTON = "🔄 Обновить исследование";
 const SIGNAL_PICKER_BUTTON = "🎯 Сигнал по тикеру";
@@ -260,6 +261,18 @@ type SignalContext = {
   >;
   macro: MacroSnapshot[];
 };
+type SignalAnalysis = {
+  direction: SignalDirection;
+  confidence: number;
+  reasons: string[];
+  stop: number;
+  target: number;
+  horizonMinutes: number;
+  matched: Combination[];
+  matchedPatterns: ProfessionalPattern[];
+  historicalEvidence: Combination | ProfessionalPattern | null;
+  marketStructure: MarketStructure;
+};
 
 let cachedSignalContext: { value: SignalContext; expiresAt: number } | null =
   null;
@@ -289,9 +302,58 @@ function formatDate(value: Date | string | null | undefined) {
 }
 
 function directionLabel(direction: SignalDirection) {
-  if (direction === "BUY") return "ПОКУПКА";
-  if (direction === "SELL") return "ПРОДАЖА";
-  return "НАБЛЮДАТЬ";
+  if (direction === "BUY") return "ЛОНГ";
+  if (direction === "SELL") return "ШОРТ";
+  return "НЕЙТРАЛЬНО";
+}
+
+function historicalPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return Math.max(MIN_TRADE_PERCENT, Math.abs(value));
+}
+
+function historicalMedianPercent(
+  combinations: Combination[],
+  direction: SignalDirection,
+  field: "bestTakeProfit" | "bestStopLoss",
+) {
+  const values = combinations
+    .filter((combination) => combination.direction === direction)
+    .map((combination) => historicalPercent(combination[field]))
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right);
+  if (!values.length) return MIN_TRADE_PERCENT;
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2
+    ? values[middle]
+    : (values[middle - 1] + values[middle]) / 2;
+}
+
+function directionFromCurrentFactors(feature: LatestFeature): SignalDirection {
+  const bullish = [
+    feature.ema20 !== null && feature.ema50 !== null && feature.ema20 > feature.ema50,
+    feature.ema50 !== null && feature.ema200 !== null && feature.ema50 > feature.ema200,
+    feature.macdHist !== null && feature.macdHist > 0,
+    feature.vwap !== null && feature.close > feature.vwap,
+    feature.acceleration !== null && feature.acceleration > 0,
+    feature.priceChange5 !== null && feature.priceChange5 > 0,
+    feature.rsi !== null && feature.rsi < 45,
+  ].filter(Boolean).length;
+  const bearish = [
+    feature.ema20 !== null && feature.ema50 !== null && feature.ema20 < feature.ema50,
+    feature.ema50 !== null && feature.ema200 !== null && feature.ema50 < feature.ema200,
+    feature.macdHist !== null && feature.macdHist < 0,
+    feature.vwap !== null && feature.close < feature.vwap,
+    feature.acceleration !== null && feature.acceleration < 0,
+    feature.priceChange5 !== null && feature.priceChange5 < 0,
+    feature.rsi !== null && feature.rsi > 55,
+  ].filter(Boolean).length;
+  if (bullish === bearish) {
+    return (feature.priceChange5 ?? feature.acceleration ?? feature.macdHist ?? 0) >= 0
+      ? "BUY"
+      : "SELL";
+  }
+  return bullish > bearish ? "BUY" : "SELL";
 }
 
 function scoreFeature(feature: LatestFeature): {
@@ -777,6 +839,29 @@ function matchesCombination(
   });
 }
 
+function combinationMatchRatio(
+  feature: LatestFeature,
+  combination: Combination,
+  thresholds: FactorThresholds | undefined,
+  professionalPatternKeys: Set<string>,
+) {
+  if (!thresholds || !combination.conditions.length) return 0;
+  const matched = combination.conditions.reduce(
+    (count, condition) =>
+      count +
+      (matchesCombination(
+        feature,
+        { ...combination, conditions: [condition] },
+        thresholds,
+        professionalPatternKeys,
+      )
+        ? 1
+        : 0),
+    0,
+  );
+  return matched / combination.conditions.length;
+}
+
 async function getCurrentProfessionalPatterns(
   ticker: string,
   timestamp: Date,
@@ -1093,17 +1178,7 @@ async function analyzeSignalWithContext(
   ticker: string,
   feature: LatestFeature,
   context: SignalContext,
-): Promise<{
-  direction: SignalDirection;
-  confidence: number;
-  reasons: string[];
-  stop: number;
-  target: number;
-  horizonMinutes: number;
-  matched: Combination[];
-  matchedPatterns: ProfessionalPattern[];
-  marketStructure: MarketStructure;
-}> {
+): Promise<SignalAnalysis> {
   const combinations = context.combinations;
   const thresholds = context.thresholdsByTicker.get(ticker);
   const marketStructure = marketStructureFromContext(
@@ -1118,37 +1193,26 @@ async function analyzeSignalWithContext(
   const matched = combinations.filter((combination) =>
     matchesCombination(feature, combination, thresholds, professionalPatternKeys),
   );
-  if (!matched.length) {
-    return {
-      direction: "HOLD" as SignalDirection,
-      confidence: 50,
-      reasons: ["Нет совпадения с подтверждённой исторической закономерностью"],
-      stop: feature.close * 0.99,
-      target: feature.close * 1.01,
-      horizonMinutes: 60,
-      matched: [] as Combination[],
-      matchedPatterns: [] as ProfessionalPattern[],
-      marketStructure,
-    };
-  }
-
-  const buyEvidence = matched
-    .filter((combination) => combination.direction === "BUY")
-    .reduce((sum, combination) => sum + Math.max(combination.expectedValue ?? 0, 0), 0);
-  const sellEvidence = matched
-    .filter((combination) => combination.direction === "SELL")
-    .reduce((sum, combination) => sum + Math.max(combination.expectedValue ?? 0, 0), 0);
-  const totalBuyEvidence = buyEvidence;
-  const totalSellEvidence = sellEvidence;
-  const direction: SignalDirection =
-    totalBuyEvidence === totalSellEvidence
-      ? "HOLD"
-      : totalBuyEvidence > totalSellEvidence
-        ? "BUY"
-        : "SELL";
+  const direction = directionFromCurrentFactors(feature);
   const relevant = matched.filter((combination) => combination.direction === direction);
   const relevantPatterns = matchedPatterns.filter((pattern) => pattern.direction === direction);
-  const bestCombination = relevant[0] ?? matched[0] ?? null;
+  const bestCombination = relevant[0] ?? null;
+  const nearestHistorical = combinations
+    .filter((combination) => combination.direction === direction)
+    .map((combination) => ({
+      combination,
+      ratio: combinationMatchRatio(
+        feature,
+        combination,
+        thresholds,
+        professionalPatternKeys,
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        right.ratio - left.ratio ||
+        evidenceScore(right.combination) - evidenceScore(left.combination),
+    )[0]?.combination ?? null;
   const bestHistorical =
     topEvidence({
       direction,
@@ -1157,10 +1221,13 @@ async function analyzeSignalWithContext(
       stop: feature.close,
       target: feature.close,
       horizonMinutes: 0,
-      matched,
-      matchedPatterns,
+      matched: relevant,
+      matchedPatterns: relevantPatterns,
+      historicalEvidence: null,
       marketStructure,
-    }) ?? bestCombination;
+    }) ??
+    bestCombination ??
+    nearestHistorical;
   const historicalConfidenceHigh =
     bestHistorical && "confidenceHigh" in bestHistorical
       ? bestHistorical.confidenceHigh
@@ -1183,8 +1250,8 @@ async function analyzeSignalWithContext(
   );
   const horizonMinutes =
     bestHistorical.bestHoldingMinutes ?? 60;
-  const bestTakeProfit = bestHistorical?.bestTakeProfit;
-  const bestStopLoss = bestHistorical?.bestStopLoss;
+  const bestTakeProfit = historicalPercent(bestHistorical?.bestTakeProfit);
+  const bestStopLoss = historicalPercent(bestHistorical?.bestStopLoss);
   const takeProfitPrice =
     bestTakeProfit !== null && bestTakeProfit !== undefined
       ? direction === "BUY"
@@ -1241,6 +1308,7 @@ async function analyzeSignalWithContext(
     horizonMinutes,
     matched,
     matchedPatterns,
+    historicalEvidence: bestHistorical,
     marketStructure,
   };
 }
@@ -1952,7 +2020,7 @@ async function topText() {
   const candidates: TopCandidate[] = [];
   let matchedLaws = 0;
   for (const item of analyses) {
-    const evidence = topEvidence(item.analysis);
+    const evidence = item.analysis.historicalEvidence;
     const confirmations = topConfirmations(item.row, item.analysis);
     const backtest = getBacktestEvidence(item.analysis);
     const blocks = scoreBlocks(
@@ -2015,164 +2083,43 @@ async function topText() {
   const blocks = ranked.map((candidate, index) => {
     const { row, analysis, evidence } = candidate;
     const entry = row.close;
-    const risk = Math.abs(entry - analysis.stop);
-    const reward = Math.abs(analysis.target - entry);
-    const riskReward = risk > 0 ? reward / risk : null;
     const evidenceWinRate = evidence?.successRate ?? null;
-    const evidenceExpectancy = evidence
-      ? "expectancy" in evidence
-        ? evidence.expectancy
-        : evidence.expectedValue
-      : null;
-    const evidenceTestWinRate = evidence && "testWinRate" in evidence
-      ? evidence.testWinRate
-      : null;
-    const evidencePValue = evidence && "pValue" in evidence ? evidence.pValue : null;
-    const evidenceQValue = evidence && "qValue" in evidence ? evidence.qValue : null;
-    const evidenceConfidenceHigh =
-      evidence && "confidenceHigh" in evidence ? evidence.confidenceHigh : null;
-    const evidenceSharpe =
-      evidence && "sharpeRatio" in evidence
-        ? evidence.sharpeRatio
-        : candidate.backtest?.sharpeRatio ?? null;
-    const scoreLines = [
-      { name: "Trend", value: candidate.scoreBlocks.trend },
-      { name: "Momentum", value: candidate.scoreBlocks.momentum },
-      { name: "Volume", value: candidate.scoreBlocks.volume },
-      { name: "Pattern", value: candidate.scoreBlocks.pattern },
-      { name: "Breakout", value: candidate.scoreBlocks.breakout },
-      { name: "SMC", value: candidate.scoreBlocks.smc },
-      { name: "Support/Resistance", value: candidate.scoreBlocks.structure },
-      { name: "Correlation", value: candidate.scoreBlocks.correlation },
-      { name: "Research", value: candidate.scoreBlocks.research },
-      { name: "Backtest", value: candidate.scoreBlocks.backtest },
-      { name: "Risk", value: candidate.scoreBlocks.risk },
-      { name: "Market Context", value: candidate.scoreBlocks.marketContext },
-    ]
-      .map(({ name, value }) => `• ${name}: ${formatNumber(value, 1)}/100`)
-      .join("\n");
-    const source = evidence
-      ? "patternType" in evidence
-        ? `Паттерн: ${evidence.patternType}`
-        : `Комбинация: ${evidence.conditions
-            .map((condition) => String(condition.label ?? condition.key ?? "фактор"))
-            .join(" + ")}`
-      : "Подтверждённая историческая закономерность не найдена";
+    const takeProfitPercent =
+      historicalPercent(evidence?.bestTakeProfit) ??
+      historicalMedianPercent(context.combinations, analysis.direction, "bestTakeProfit");
+    const stopLossPercent =
+      historicalPercent(evidence?.bestStopLoss) ??
+      historicalMedianPercent(context.combinations, analysis.direction, "bestStopLoss");
+    const target =
+      analysis.direction === "BUY"
+        ? entry * (1 + takeProfitPercent / 100)
+        : entry * (1 - takeProfitPercent / 100);
+    const stop =
+      analysis.direction === "BUY"
+        ? entry * (1 - stopLossPercent / 100)
+        : entry * (1 + stopLossPercent / 100);
+    const direction = directionLabel(analysis.direction);
+    const horizon = evidence?.bestHoldingMinutes ?? analysis.horizonMinutes;
     return [
-      `${index + 1}. 📈 ${row.ticker} — ${directionLabel(analysis.direction)}`,
-      `AI Score: ${candidate.rating}/100`,
-      `Уверенность: ${analysis.confidence}%`,
+      `${index + 1}. ${row.ticker} — ${direction}`,
+      `Win Rate: ${formatNumber(evidenceWinRate !== null ? evidenceWinRate * 100 : null, 2)}%`,
+      `Ситуаций: ${formatCount(evidence?.occurrences)}`,
       `Вход: ${formatNumber(entry)}`,
-      `Стоп: ${formatNumber(analysis.stop)} · Тейк: ${formatNumber(analysis.target)}`,
-      `Risk/Reward: 1 : ${formatNumber(riskReward, 2)}`,
-      `Горизонт: ${analysis.horizonMinutes} минут`,
-      "",
-      "Блоки AI Score:",
-      scoreLines,
-      "",
-      "Историческая статистика:",
-      `• ${source}`,
-      `• Появлений: ${formatCount(evidence?.occurrences)}`,
-      `• Win Rate: ${formatNumber(
-        evidenceWinRate !== null ? evidenceWinRate * 100 : null,
-        2,
-      )}%`,
-      `• Test Win Rate: ${formatNumber(
-        evidenceTestWinRate !== null ? evidenceTestWinRate * 100 : null,
-        2,
-      )}%`,
-      `• Profit Factor: ${formatNumber(evidence?.profitFactor)}`,
-      `• Expectancy: ${formatNumber(evidenceExpectancy, 4)}%`,
-      `• Train: ${formatNumber(
-        evidence &&
-        "trainWinRate" in evidence &&
-        evidence.trainWinRate !== null
-          ? evidence.trainWinRate * 100
-          : null,
-        2,
-      )}% WR / ${formatNumber(
-        evidence && "trainExpectancy" in evidence
-          ? evidence.trainExpectancy
-          : evidence && "trainExpectedValue" in evidence
-            ? evidence.trainExpectedValue
-            : null,
-        4,
-      )}%`,
-      `• Средняя прибыль/убыток: ${formatNumber(evidence?.averageProfit, 4)}% / ${formatNumber(evidence?.averageLoss, 4)}%`,
-      `• Просадка: ${formatNumber(evidence?.maxDrawdown, 4)}%`,
-      `• Sharpe: ${formatNumber(evidenceSharpe, 3)}`,
-      `• Лучший TP/SL: ${formatNumber(evidence?.bestTakeProfit)}% / ${formatNumber(evidence?.bestStopLoss)}%`,
-      `• p-value/q-value: ${formatNumber(evidencePValue, 6)} / ${formatNumber(evidenceQValue, 6)}`,
-      `• Доверительный интервал: ${formatNumber(
-        evidence &&
-        evidence.confidenceLow !== null &&
-        evidence.confidenceLow !== undefined
-          ? evidence.confidenceLow * 100
-          : null,
-        2,
-      )}%–${formatNumber(
-        evidenceConfidenceHigh !== null && evidenceConfidenceHigh !== undefined
-          ? evidenceConfidenceHigh * 100
-          : null,
-        2,
-      )}%`,
-      "",
-      `Подтверждений: ${candidate.confirmations.filter(
-        (reason) =>
-          !reason.includes("исторических комбинаций") &&
-          !reason.includes("подтверждённых паттернов"),
-      ).length}`,
-      `Совпавших паттернов: ${candidate.matchedPatterns.length}`,
-      candidate.matchedPatterns.length
-        ? `Паттерны: ${candidate.matchedPatterns.join(", ")}`
-        : null,
-      `Совпавших факторов: ${candidate.matchedFactors.length}`,
-      candidate.matchedFactors.length
-        ? `Факторы: ${candidate.matchedFactors.join(", ")}`
-        : null,
-      "Подтверждения индикаторов:",
-      ...candidate.confirmations.slice(0, 10).map((reason) => `• ${reason}`),
-      `Почему AI выбрал: ${candidate.confirmations
-        .filter(
-          (reason) =>
-            !reason.includes("исторических комбинаций") &&
-            !reason.includes("подтверждённых паттернов"),
-        )
-        .slice(0, 3)
-        .join("; ") || "есть подтверждённая историческая закономерность и положительный тест"}`,
-      analysis.marketStructure.support !== null
-        ? `• Поддержка: ${formatNumber(analysis.marketStructure.support)} (сила ${formatNumber(analysis.marketStructure.supportStrength)})`
-        : null,
-      analysis.marketStructure.resistance !== null
-        ? `• Сопротивление: ${formatNumber(analysis.marketStructure.resistance)} (сила ${formatNumber(analysis.marketStructure.resistanceStrength)})`
-        : null,
+      `Тейк: ${formatNumber(target)} (${analysis.direction === "BUY" ? "+" : "-"}${formatNumber(takeProfitPercent)}%)`,
+      `Стоп: ${formatNumber(stop)} (${analysis.direction === "BUY" ? "-" : "+"}${formatNumber(stopLossPercent)}%)`,
+      `Горизонт: ${formatNumber(horizon, 0)} минут`,
     ]
       .filter((line): line is string => Boolean(line))
       .join("\n");
   });
 
   return [
-    "🔥 Лучшие сигналы — realtime-анализ IMOEX",
+    "🔥 Лучшие сигналы IMOEX",
     "",
     ...blocks.flatMap((block) => [block, ""]),
-    "📊 Статистика работы AI:",
-    `• Акций проанализировано: ${formatCount(stats.tickers)}`,
-    `• Свечей: ${formatCount(stats.candles)}`,
-    `• Признаков просмотрено: ${formatCount(stats.features)}`,
-    `• Паттернов найдено: ${formatCount(stats.detected_patterns)}`,
-    `• Паттернов подтверждено: ${formatCount(stats.patterns_confirmed)}`,
-    `• Комбинаций факторов проверено: ${formatCount(stats.combinations_checked)}`,
-    `• Статистически значимых комбинаций: ${formatCount(stats.combinations_significant)}`,
-    `• Закономерностей совпало: ${formatCount(matchedLaws)}`,
-    `• Уровней: ${formatCount(stats.levels)}`,
-    `• Корреляций: ${formatCount(stats.correlations)}`,
-    `• Рыночный контекст: ${macroSummary}`,
-    `• Версия ядра: ${RESEARCH_ENGINE_VERSION}`,
-    `• Веса Score: Trend ${AI_SCORE_WEIGHTS.trend * 100}% · Momentum ${AI_SCORE_WEIGHTS.momentum * 100}% · Pattern ${AI_SCORE_WEIGHTS.pattern * 100}% · Research ${AI_SCORE_WEIGHTS.research * 100}% · Backtest ${AI_SCORE_WEIGHTS.backtest * 100}%`,
-    `• Время анализа: ${formatNumber((Date.now() - startedAt) / 1000, 1)} сек.`,
+    `Проанализировано акций: ${formatCount(stats.tickers)} · обновлено: ${formatDate(new Date())}`,
     "",
     "Для детального сигнала: /signal ТИКЕР",
-    "Это статистический исследовательский сигнал, не финансовая рекомендация.",
   ].join("\n");
 }
 

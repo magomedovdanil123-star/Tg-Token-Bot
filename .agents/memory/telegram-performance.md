@@ -20,3 +20,9 @@ For the TOP command, ranking and eligibility are separate: show the strongest av
 **Why:** The user explicitly wants a simple TOP-5 ordered from best to worst, without statistical thresholds hiding candidates.
 
 **How to apply:** Keep quality metrics visible in the report, but do not use Score, win rate, profit factor, expectancy, test results, or confirmation counts as exclusion gates for `/top`.
+
+The TOP response is intentionally an actionable compact signal: current entry, long/short direction from current factors, historical win rate and occurrences, historical TP/SL with a 0.3% floor, and holding horizon.
+
+**Why:** The user needs a practical one-hour-style forecast rather than a diagnostic dump of every research block.
+
+**How to apply:** Keep the full research engine behind the calculation, but keep `/top` output short; use `—` only when the database truly has no historical value.
