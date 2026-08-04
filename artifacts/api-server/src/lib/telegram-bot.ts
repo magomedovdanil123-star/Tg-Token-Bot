@@ -20,9 +20,11 @@ const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
 const POLL_TIMEOUT_SECONDS = 25;
 const REFRESH_BUTTON = "🔄 Обновить исследование";
+const SIGNAL_PICKER_BUTTON = "🎯 Сигнал по тикеру";
 const TELEGRAM_MENU = {
   keyboard: [
     [REFRESH_BUTTON],
+    [SIGNAL_PICKER_BUTTON],
     ["🔥 Лучшие сигналы", "📋 Состав IMOEX"],
     ["📈 Состояние рынка", "❓ Помощь"],
   ],
@@ -37,6 +39,14 @@ type TelegramUpdate = {
     chat: { id: number };
     text?: string;
     from?: { first_name?: string; username?: string };
+  };
+  callback_query?: {
+    id: string;
+    data?: string;
+    from?: { first_name?: string; username?: string };
+    message?: {
+      chat: { id: number };
+    };
   };
 };
 
@@ -102,6 +112,7 @@ type Combination = {
   holdingMinutes: number | null;
   confidenceLow: number | null;
   confidenceHigh: number | null;
+  profitFactor: number | null;
   bestTakeProfit: number | null;
   bestStopLoss: number | null;
   bestHoldingMinutes: number | null;
@@ -422,6 +433,7 @@ async function getValidatedCombinations(): Promise<Combination[]> {
       conditions: featureCombinations.conditions,
       direction: featureCombinations.direction,
       successRate: featureCombinations.successRate,
+      profitFactor: featureCombinations.profitFactor,
       expectedValue: featureCombinations.expectedValue,
       occurrences: featureCombinations.occurrences,
       holdingMinutes: featureCombinations.holdingMinutes,
@@ -957,6 +969,43 @@ function isRefreshRequest(text: string) {
   );
 }
 
+function isSignalPickerRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === SIGNAL_PICKER_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "сигнал по тикеру" ||
+    normalizedText === "/signal"
+  );
+}
+
+async function signalPicker() {
+  const rows = await db
+    .select({
+      ticker: moexTickers.secid,
+      shortName: moexTickers.shortName,
+    })
+    .from(moexTickers)
+    .where(eq(moexTickers.isActive, true))
+    .orderBy(asc(moexTickers.rank));
+
+  const buttons = rows.map((row) => ({
+    text: row.shortName
+      ? `${row.ticker} — ${row.shortName.slice(0, 18)}`
+      : row.ticker,
+    callback_data: `signal:${row.ticker}`,
+  }));
+
+  return {
+    text: "🎯 Выберите акцию IMOEX для анализа:",
+    replyMarkup: {
+      inline_keyboard: Array.from(
+        { length: Math.ceil(buttons.length / 2) },
+        (_, index) => buttons.slice(index * 2, index * 2 + 2),
+      ),
+    },
+  };
+}
+
 async function researchResultsText() {
   const rows = await db
     .select({
@@ -1183,6 +1232,11 @@ async function signalText(ticker: string) {
   const analysis = await analyzeSignal(ticker, feature);
   const combinationIds = analysis.matched.map((combination) => combination.id);
   const patternIds = analysis.matchedPatterns.map((pattern) => pattern.id);
+  const bestCombination =
+    analysis.matched
+      .filter((combination) => combination.direction === analysis.direction)
+      .sort((left, right) => (right.expectedValue ?? -Infinity) - (left.expectedValue ?? -Infinity))[0] ??
+    analysis.matched[0];
   await db.insert(signalsHistory).values({
     ticker,
     timeframe: TIMEFRAME,
@@ -1207,7 +1261,9 @@ async function signalText(ticker: string) {
   return [
     `📊 ${ticker}`,
     `Сигнал: ${directionLabel(analysis.direction)}`,
-    `Уверенность: ${analysis.confidence}%`,
+    `Прогноз/уверенность: ${analysis.confidence}%`,
+    `Win rate закономерности: ${bestCombination ? formatNumber((bestCombination.successRate ?? 0) * 100, 2) : "—"}%`,
+    `Profit factor: ${bestCombination ? formatNumber(bestCombination.profitFactor) : "—"}`,
     `Цена: ${formatNumber(feature.close)}`,
     "",
     "Причины:",
@@ -1303,6 +1359,9 @@ async function handleMessage(chatId: number, text: string) {
   if (normalizedCommand === "/top") {
     return topText();
   }
+  if (isSignalPickerRequest(text)) {
+    return "Нажмите кнопку «🎯 Сигнал по тикеру», чтобы выбрать акцию.";
+  }
   if (isRefreshRequest(text)) {
     return "Запуск обновления...";
   }
@@ -1346,13 +1405,18 @@ function createTelegramClient(token: string) {
     deleteWebhook: () => call<boolean>("deleteWebhook", { drop_pending_updates: false }),
     setMyCommands: (commands: string) =>
       call<boolean>("setMyCommands", { commands }),
+    answerCallbackQuery: (callbackQueryId: string, text?: string) =>
+      call<boolean>("answerCallbackQuery", {
+        callback_query_id: callbackQueryId,
+        text,
+      }),
     getUpdates: (offset: number, signal: AbortSignal) =>
       call<TelegramUpdate[]>(
         "getUpdates",
         {
           offset,
           timeout: POLL_TIMEOUT_SECONDS,
-          allowed_updates: JSON.stringify(["message"]),
+          allowed_updates: JSON.stringify(["message", "callback_query"]),
         },
         signal,
       ),
@@ -1413,11 +1477,52 @@ export function startTelegramBot() {
           }
           for (const update of updates) {
             offset = update.update_id + 1;
+            const callback = update.callback_query;
+            if (callback) {
+              const callbackData = callback.data ?? "";
+              const callbackChatId = callback.message?.chat.id;
+              try {
+                await client.answerCallbackQuery(
+                  callback.id,
+                  callbackData.startsWith("signal:")
+                    ? "Анализирую акцию..."
+                    : undefined,
+                );
+                if (callbackChatId && callbackData.startsWith("signal:")) {
+                  const ticker = callbackData
+                    .slice("signal:".length)
+                    .toUpperCase()
+                    .replace(/[^A-Z0-9_]/g, "");
+                  const response = await signalText(ticker);
+                  await client.sendMessage(callbackChatId, response);
+                  logger.info({ ticker }, "Telegram ticker signal sent");
+                }
+              } catch (error) {
+                logger.error({ err: error, callbackData }, "Telegram callback failed");
+                if (callbackChatId) {
+                  await client.sendMessage(
+                    callbackChatId,
+                    "Не удалось получить сигнал. Попробуйте выбрать тикер ещё раз.",
+                  );
+                }
+              }
+              continue;
+            }
             const message = update.message;
             if (!message?.text) continue;
             const command = message.text.trim().split(/\s+/, 1)[0];
             logger.info({ command }, "Telegram command received");
             try {
+              if (isSignalPickerRequest(message.text)) {
+                const picker = await signalPicker();
+                await client.sendMessage(
+                  message.chat.id,
+                  picker.text,
+                  picker.replyMarkup,
+                );
+                logger.info({ command }, "Telegram ticker picker sent");
+                continue;
+              }
               if (isRefreshRequest(message.text)) {
                 const refresh = startResearchRefresh((progress) =>
                   client.sendMessage(message.chat.id, progress),
