@@ -72,9 +72,14 @@ type StockAnalogStat = {
   cases: number;
   upCases: number;
   downCases: number;
+  cases6h: number;
+  upCases6h: number;
+  downCases6h: number;
   average1h: number | null;
   average3h: number | null;
   average6h: number | null;
+  averageUp6h: number | null;
+  averageDown6h: number | null;
   average5d: number | null;
   averageUp5d: number | null;
   averageDown5d: number | null;
@@ -82,6 +87,7 @@ type StockAnalogStat = {
   maxDown5d: number | null;
   stddev5d: number | null;
   stability: "Высокая" | "Средняя" | "Низкая";
+  stability6h: "Высокая" | "Средняя" | "Низкая";
 };
 
 type StockAnalogMatch = {
@@ -736,6 +742,9 @@ function buildStockStats(
       const results = items
         .map((item) => item.result5d)
         .filter((value): value is number => value !== null && Number.isFinite(value));
+      const results6h = items
+        .map((item) => item.result6h)
+        .filter((value): value is number => value !== null && Number.isFinite(value));
       const averageHorizon = (values: Array<number | null>) => {
         const valid = values.filter(
           (value): value is number => value !== null && Number.isFinite(value),
@@ -757,6 +766,22 @@ function buildStockStats(
       const averageDown5d = downResults.length
         ? downResults.reduce((sum, value) => sum + value, 0) / downResults.length
         : null;
+      const upResults6h = results6h.filter((value) => value > 0);
+      const downResults6h = results6h.filter((value) => value < 0);
+      const average6h = averageHorizon(items.map((item) => item.result6h));
+      const averageUp6h = upResults6h.length
+        ? upResults6h.reduce((sum, value) => sum + value, 0) / upResults6h.length
+        : null;
+      const averageDown6h = downResults6h.length
+        ? downResults6h.reduce((sum, value) => sum + value, 0) / downResults6h.length
+        : null;
+      const stddev6h =
+        results6h.length > 1 && average6h !== null
+          ? Math.sqrt(
+              results6h.reduce((sum, value) => sum + (value - average6h) ** 2, 0) /
+                results6h.length,
+            )
+          : 0;
       const stddev5d =
         results.length > 1 && average5d !== null
           ? Math.sqrt(
@@ -773,15 +798,29 @@ function buildStockStats(
           : results.length >= 8 && dominantProbability >= 0.6
             ? "Средняя"
             : "Низкая";
+      const dominantProbability6h = results6h.length
+        ? Math.max(upResults6h.length, downResults6h.length) / results6h.length
+        : 0;
+      const stability6h: StockAnalogStat["stability6h"] =
+        results6h.length >= 10 && dominantProbability6h >= 0.7 && stddev6h <= 3
+          ? "Высокая"
+          : results6h.length >= 8 && dominantProbability6h >= 0.6
+            ? "Средняя"
+            : "Низкая";
       return {
         ticker,
         currentPrice: currentPrices.get(ticker) ?? null,
         cases: results.length,
         upCases,
         downCases,
+        cases6h: results6h.length,
+        upCases6h: upResults6h.length,
+        downCases6h: downResults6h.length,
         average1h: averageHorizon(items.map((item) => item.result1h)),
         average3h: averageHorizon(items.map((item) => item.result3h)),
-        average6h: averageHorizon(items.map((item) => item.result6h)),
+        average6h,
+        averageUp6h,
+        averageDown6h,
         average5d,
         averageUp5d,
         averageDown5d,
@@ -789,6 +828,7 @@ function buildStockStats(
         maxDown5d: results.length ? Math.min(...results) : null,
         stddev5d,
         stability,
+        stability6h,
       };
     })
     .sort((left, right) => {
@@ -818,6 +858,12 @@ function stockProbability(stock: StockAnalogStat, direction: "LONG" | "SHORT") {
   return (count / stock.cases) * 100;
 }
 
+function stockProbability6h(stock: StockAnalogStat, direction: "LONG" | "SHORT") {
+  if (!stock.cases6h) return null;
+  const count = direction === "LONG" ? stock.upCases6h : stock.downCases6h;
+  return (count / stock.cases6h) * 100;
+}
+
 function formatStockStat(stock: StockAnalogStat) {
   return [
     `${stock.ticker}: текущая цена ${formatNumber(stock.currentPrice)} · аналогов ${stock.cases}`,
@@ -839,12 +885,12 @@ function candidateLevels(stock: StockAnalogStat, direction: "LONG" | "SHORT") {
   }
   const tpPercent =
     direction === "LONG"
-      ? riskPercent(stock.averageUp5d)
-      : riskPercent(stock.averageDown5d);
+      ? riskPercent(stock.averageUp6h)
+      : riskPercent(stock.averageDown6h);
   const slPercent =
     direction === "LONG"
-      ? riskPercent(stock.averageDown5d)
-      : riskPercent(stock.averageUp5d);
+      ? riskPercent(stock.averageDown6h)
+      : riskPercent(stock.averageUp6h);
   return {
     entry,
     tpPercent,
@@ -863,17 +909,16 @@ function formatCandidate(
   return [
     "",
     `${index}. ${stock.ticker} — ${direction}`,
-    `Аналогов: ${stock.cases}`,
-    `${direction === "LONG" ? "Ростов" : "Падений"}: ${direction === "LONG" ? stock.upCases : stock.downCases}`,
-    `Вероятность ${direction}: ${formatNumber(stockProbability(stock, direction), 0)}%`,
-    `Среднее движение: ${signedNumber(stock.average5d)}%`,
+    `Аналогов с данными 6ч: ${stock.cases6h}`,
+    `${direction === "LONG" ? "Ростов" : "Падений"} через 6 часов: ${direction === "LONG" ? stock.upCases6h : stock.downCases6h}`,
+    `Вероятность ${direction} через 6 часов: ${formatNumber(stockProbability6h(stock, direction), 0)}%`,
     `Изменение через 1 час: ${signedNumber(stock.average1h)}%`,
     `Изменение через 3 часа: ${signedNumber(stock.average3h)}%`,
-    `Изменение через 6 часов: ${signedNumber(stock.average6h)}%`,
+    `Изменение через 6 часов (основа сигнала): ${signedNumber(stock.average6h)}%`,
     `Текущая цена / вход: ${formatNumber(levels.entry)}`,
     `Take profit: ${formatNumber(levels.takeProfit)} (${signedNumber(levels.tpPercent)}%)`,
     `Stop loss: ${formatNumber(levels.stopLoss)} (${signedNumber(levels.slPercent)}%)`,
-    `Стабильность: ${stock.stability}`,
+    `Стабильность: ${stock.stability6h}`,
   ];
 }
 
@@ -959,6 +1004,11 @@ export async function scanMarketAnalogues(): Promise<string> {
   const fiveDayResults = matches
     .map((match) => match.result5d)
     .filter((value): value is number => value !== null);
+  const sixHourResults = matches
+    .map((match) => match.result6h)
+    .filter((value): value is number => value !== null);
+  const sixHourLongResults = sixHourResults.filter((value) => value > 0);
+  const sixHourShortResults = sixHourResults.filter((value) => value < 0);
   const longResults = fiveDayResults.filter((value) => value > 0);
   const shortResults = fiveDayResults.filter((value) => value < 0);
   const longProbability = fiveDayResults.length
@@ -970,19 +1020,19 @@ export async function scanMarketAnalogues(): Promise<string> {
   const average = (values: number[]) =>
     values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
   const longCandidates = stockStats
-    .filter((stock) => stock.upCases > stock.downCases && (stockProbability(stock, "LONG") ?? 0) >= 50)
+    .filter((stock) => stock.upCases6h > stock.downCases6h && (stockProbability6h(stock, "LONG") ?? 0) >= 50)
     .sort(
       (left, right) =>
-        (stockProbability(right, "LONG") ?? 0) - (stockProbability(left, "LONG") ?? 0) ||
-        (right.average5d ?? -Infinity) - (left.average5d ?? -Infinity),
+        (stockProbability6h(right, "LONG") ?? 0) - (stockProbability6h(left, "LONG") ?? 0) ||
+        (right.average6h ?? -Infinity) - (left.average6h ?? -Infinity),
     )
     .slice(0, 5);
   const shortCandidates = stockStats
-    .filter((stock) => stock.downCases > stock.upCases && (stockProbability(stock, "SHORT") ?? 0) >= 50)
+    .filter((stock) => stock.downCases6h > stock.upCases6h && (stockProbability6h(stock, "SHORT") ?? 0) >= 50)
     .sort(
       (left, right) =>
-        (stockProbability(right, "SHORT") ?? 0) - (stockProbability(left, "SHORT") ?? 0) ||
-        (left.average5d ?? Infinity) - (right.average5d ?? Infinity),
+        (stockProbability6h(right, "SHORT") ?? 0) - (stockProbability6h(left, "SHORT") ?? 0) ||
+        (left.average6h ?? Infinity) - (right.average6h ?? Infinity),
     )
     .slice(0, 5);
   const stockMatchesByDate = new Map<number, StockAnalogMatch[]>();
