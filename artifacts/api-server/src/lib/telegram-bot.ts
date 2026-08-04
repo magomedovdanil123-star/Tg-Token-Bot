@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, sql } from "drizzle-orm";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
@@ -77,6 +77,15 @@ type LatestFeature = {
   bbLower: number | null;
   bbWidth: number | null;
   adx: number | null;
+  stochasticRsi: number | null;
+  cci: number | null;
+  williamsR: number | null;
+  mfi: number | null;
+  obv: number | null;
+  trendStrength: number | null;
+  distanceToEma20: number | null;
+  distanceToEma50: number | null;
+  distanceToEma200: number | null;
   acceleration: number | null;
   priceChange3: number | null;
   priceChange5: number | null;
@@ -117,7 +126,34 @@ type Combination = {
   profitFactor: number | null;
   bestTakeProfit: number | null;
   bestStopLoss: number | null;
+  averageProfit: number | null;
+  averageLoss: number | null;
+  maxDrawdown: number | null;
+  testWinRate: number | null;
+  testExpectedValue: number | null;
+  pValue: number | null;
+  qValue: number | null;
   bestHoldingMinutes: number | null;
+  statisticalSignificance: boolean;
+};
+type HistoricalEvidence = {
+  winRate: number | null;
+  profitFactor: number | null;
+  expectancy: number | null;
+  occurrences: number;
+  averageProfit: number | null;
+  averageLoss: number | null;
+  maxDrawdown: number | null;
+  bestTakeProfit: number | null;
+  bestStopLoss: number | null;
+  bestHoldingMinutes: number | null;
+  confidenceLow: number | null;
+  confidenceHigh: number | null;
+  pValue: number | null;
+  qValue: number | null;
+  testWinRate: number | null;
+  testExpectancy: number | null;
+  source: string;
 };
 type FactorThresholds = {
   rsiLow: number | null;
@@ -159,10 +195,24 @@ type CandlePattern = {
 type ProfessionalPattern = CandlePattern & {
   confidence: number;
   patternType: string;
+  averageLoss: number | null;
+  maxDrawdown: number | null;
+  bestTakeProfit: number | null;
+  bestStopLoss: number | null;
+  bestHoldingMinutes: number | null;
+  confidenceLow: number | null;
+  confidenceHigh: number | null;
+  pValue: number | null;
+  qValue: number | null;
+  trainWinRate: number | null;
+  testWinRate: number | null;
+  expectancy: number | null;
 };
 type MarketStructure = {
   support: number | null;
   resistance: number | null;
+  supportStrength: number | null;
+  resistanceStrength: number | null;
   correlation: number | null;
   correlationSamples: number | null;
 };
@@ -171,7 +221,10 @@ type SignalContext = {
   volatilityMedian: number | null;
   thresholdsByTicker: Map<string, FactorThresholds>;
   patternsByTicker: Map<string, CandlePattern[]>;
-  levelsByTicker: Map<string, { levelType: string; price: number }[]>;
+  levelsByTicker: Map<
+    string,
+    { levelType: string; price: number; strength: number | null }[]
+  >;
   correlationsByTicker: Map<
     string,
     { correlation: number | null; sampleCount: number | null }
@@ -291,6 +344,15 @@ async function getLatestFeature(ticker: string): Promise<LatestFeature | null> {
       bbLower: features.bbLower,
       bbWidth: features.bbWidth,
       adx: features.adx,
+      stochasticRsi: features.stochasticRsi,
+      cci: features.cci,
+      williamsR: features.williamsR,
+      mfi: features.mfi,
+      obv: features.obv,
+      trendStrength: features.trendStrength,
+      distanceToEma20: features.distanceToEma20,
+      distanceToEma50: features.distanceToEma50,
+      distanceToEma200: features.distanceToEma200,
       acceleration: features.acceleration,
       priceChange3: features.priceChange3,
       priceChange5: features.priceChange5,
@@ -364,6 +426,15 @@ async function getTopRows() {
       f.bb_lower AS "bbLower",
       f.bb_width AS "bbWidth",
       f.adx,
+      f.stochastic_rsi AS "stochasticRsi",
+      f.cci,
+      f.williams_r AS "williamsR",
+      f.mfi,
+      f.obv,
+      f.trend_strength AS "trendStrength",
+      f.distance_to_ema_20 AS "distanceToEma20",
+      f.distance_to_ema_50 AS "distanceToEma50",
+      f.distance_to_ema_200 AS "distanceToEma200",
       f.acceleration,
       f.price_change_3 AS "priceChange3",
       f.price_change_5 AS "priceChange5",
@@ -401,6 +472,15 @@ async function getTopRows() {
         f.bb_lower,
         f.bb_width,
         f.adx,
+        f.stochastic_rsi,
+        f.cci,
+        f.williams_r,
+        f.mfi,
+        f.obv,
+        f.trend_strength,
+        f.distance_to_ema_20,
+        f.distance_to_ema_50,
+        f.distance_to_ema_200,
         f.acceleration,
         f.price_change_3,
         f.price_change_5,
@@ -447,12 +527,32 @@ async function getValidatedCombinations(): Promise<Combination[]> {
       confidenceHigh: featureCombinations.confidenceHigh,
       bestTakeProfit: featureCombinations.bestTakeProfit,
       bestStopLoss: featureCombinations.bestStopLoss,
+      averageProfit: featureCombinations.averageProfit,
+      averageLoss: featureCombinations.averageLoss,
+      maxDrawdown: featureCombinations.maxDrawdown,
+      testWinRate: featureCombinations.testWinRate,
+      testExpectedValue: featureCombinations.testExpectedValue,
+      pValue: featureCombinations.pValue,
+      qValue: sql<number | null>`
+        (
+          SELECT NULLIF(sr.metadata ->> 'qValue', '')::double precision
+          FROM strategy_results sr
+          WHERE sr.name = ${featureCombinations.name}
+            AND sr.version = 'engine-1'
+          LIMIT 1
+        )
+      `,
       bestHoldingMinutes: featureCombinations.bestHoldingMinutes,
+      statisticalSignificance: featureCombinations.statisticalSignificance,
     })
     .from(featureCombinations)
     .where(
       and(
         eq(featureCombinations.isActive, true),
+        eq(featureCombinations.statisticalSignificance, true),
+        gte(featureCombinations.occurrences, 30),
+        sql`${featureCombinations.successRate} >= 0.55`,
+        sql`${featureCombinations.profitFactor} > 1.2`,
         sql`${featureCombinations.name} LIKE 'auto-engine:%'`,
       ),
     )
@@ -590,6 +690,18 @@ async function getCurrentProfessionalPatterns(
       profitFactor: patternStatistics.profitFactor,
       occurrences: patternStatistics.occurrences,
       averageProfit: patternStatistics.averageProfit,
+      averageLoss: patternStatistics.averageLoss,
+      maxDrawdown: patternStatistics.maxDrawdown,
+      bestTakeProfit: patternStatistics.bestTakeProfit,
+      bestStopLoss: patternStatistics.bestStopLoss,
+      bestHoldingMinutes: patternStatistics.bestHoldingMinutes,
+      confidenceLow: patternStatistics.confidenceLow,
+      confidenceHigh: patternStatistics.confidenceHigh,
+      pValue: patternStatistics.pValue,
+      qValue: patternStatistics.qValue,
+      trainWinRate: patternStatistics.trainWinRate,
+      testWinRate: patternStatistics.testWinRate,
+      expectancy: patternStatistics.expectancy,
     })
     .from(detectedPatterns)
     .innerJoin(
@@ -711,16 +823,22 @@ function marketStructureFromContext(
   const levels = context.levelsByTicker.get(ticker) ?? [];
   const supports = levels
     .filter((level) => level.levelType === "support")
-    .map((level) => level.price)
-    .filter((price) => Number.isFinite(price) && price <= currentPrice);
+    .map((level) => ({ price: level.price, strength: level.strength }))
+    .filter((level) => Number.isFinite(level.price) && level.price <= currentPrice);
   const resistances = levels
     .filter((level) => level.levelType === "resistance")
-    .map((level) => level.price)
-    .filter((price) => Number.isFinite(price) && price >= currentPrice);
+    .map((level) => ({ price: level.price, strength: level.strength }))
+    .filter((level) => Number.isFinite(level.price) && level.price >= currentPrice);
   const correlation = context.correlationsByTicker.get(ticker);
   return {
-    support: supports.length ? Math.max(...supports) : null,
-    resistance: resistances.length ? Math.min(...resistances) : null,
+    support: supports.length ? Math.max(...supports.map((level) => level.price)) : null,
+    resistance: resistances.length ? Math.min(...resistances.map((level) => level.price)) : null,
+    supportStrength: supports.length
+      ? Math.max(...supports.map((level) => level.strength ?? 0))
+      : null,
+    resistanceStrength: resistances.length
+      ? Math.max(...resistances.map((level) => level.strength ?? 0))
+      : null,
     correlation: correlation?.correlation ?? null,
     correlationSamples: correlation?.sampleCount ?? null,
   };
@@ -752,6 +870,7 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
           ticker: marketLevels.ticker,
           levelType: marketLevels.levelType,
           price: marketLevels.price,
+          strength: marketLevels.strength,
         })
         .from(marketLevels)
         .where(eq(marketLevels.timeframe, TIMEFRAME)),
@@ -781,11 +900,15 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
   }
   const levelsByTicker = new Map<
     string,
-    { levelType: string; price: number }[]
+    { levelType: string; price: number; strength: number | null }[]
   >();
   for (const level of levelRows) {
     const current = levelsByTicker.get(level.ticker) ?? [];
-    current.push({ levelType: level.levelType, price: level.price });
+    current.push({
+      levelType: level.levelType,
+      price: level.price,
+      strength: level.strength,
+    });
     levelsByTicker.set(level.ticker, current);
   }
   const correlationsByTicker = new Map<
@@ -854,7 +977,7 @@ async function analyzeSignal(ticker: string, feature: LatestFeature): Promise<{
   target: number;
   horizonMinutes: number;
   matched: Combination[];
-  matchedPatterns: CandlePattern[];
+  matchedPatterns: ProfessionalPattern[];
   marketStructure: MarketStructure;
 }> {
   return analyzeSignalWithContext(ticker, feature, await getSignalContext());
@@ -872,7 +995,7 @@ async function analyzeSignalWithContext(
   target: number;
   horizonMinutes: number;
   matched: Combination[];
-  matchedPatterns: CandlePattern[];
+  matchedPatterns: ProfessionalPattern[];
   marketStructure: MarketStructure;
 }> {
   const combinations = context.combinations;
@@ -898,7 +1021,7 @@ async function analyzeSignalWithContext(
       target: feature.close * 1.01,
       horizonMinutes: 60,
       matched: [] as Combination[],
-      matchedPatterns: [],
+      matchedPatterns: [] as ProfessionalPattern[],
       marketStructure,
     };
   }
@@ -919,21 +1042,43 @@ async function analyzeSignalWithContext(
         : "SELL";
   const relevant = matched.filter((combination) => combination.direction === direction);
   const relevantPatterns = matchedPatterns.filter((pattern) => pattern.direction === direction);
-  const best = relevant[0] ?? matched[0] ?? null;
+  const bestCombination = relevant[0] ?? matched[0] ?? null;
+  const bestHistorical =
+    topEvidence({
+      direction,
+      confidence: 50,
+      reasons: [],
+      stop: feature.close,
+      target: feature.close,
+      horizonMinutes: 0,
+      matched,
+      matchedPatterns,
+      marketStructure,
+    }) ?? bestCombination;
+  const historicalConfidenceHigh =
+    bestHistorical && "confidenceHigh" in bestHistorical
+      ? bestHistorical.confidenceHigh
+      : null;
+  const historicalTestWinRate =
+    bestHistorical && "testWinRate" in bestHistorical
+      ? bestHistorical.testWinRate
+      : null;
   const confidence = Math.round(
     Math.max(
       50,
       Math.min(
         95,
-        ((best?.successRate ?? 0.5) * 100 +
-          (best?.confidenceHigh ?? 0.5) * 100) /
+        ((bestHistorical?.successRate ?? 0.5) * 100 +
+          (historicalConfidenceHigh ?? historicalTestWinRate ?? 0.5) *
+            100) /
           2,
       ),
     ),
   );
-  const horizonMinutes = best?.holdingMinutes ?? 60;
-  const bestTakeProfit = best?.bestTakeProfit;
-  const bestStopLoss = best?.bestStopLoss;
+  const horizonMinutes =
+    bestHistorical.bestHoldingMinutes ?? 60;
+  const bestTakeProfit = bestHistorical?.bestTakeProfit;
+  const bestStopLoss = bestHistorical?.bestStopLoss;
   const takeProfitPrice =
     bestTakeProfit !== null && bestTakeProfit !== undefined
       ? direction === "BUY"
@@ -992,6 +1137,180 @@ async function analyzeSignalWithContext(
     matchedPatterns,
     marketStructure,
   };
+}
+
+type TopCandidate = {
+  row: TopRow;
+  analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>;
+  rating: number;
+  evidence: Combination | ProfessionalPattern;
+  confirmations: string[];
+  matchedFactorCount: number;
+};
+
+function evidenceScore(evidence: Combination | ProfessionalPattern) {
+  const winRate = evidence.successRate ?? 0;
+  const expectancy =
+    "expectancy" in evidence
+      ? evidence.expectancy ?? 0
+      : evidence.expectedValue ?? 0;
+  const profitFactor = evidence.profitFactor ?? 0;
+  const occurrences = evidence.occurrences ?? 0;
+  const testWinRate =
+    "testWinRate" in evidence ? evidence.testWinRate ?? winRate : winRate;
+  return (
+    expectancy * 10 +
+    profitFactor * 2 +
+    winRate * 50 +
+    testWinRate * 30 +
+    Math.log1p(occurrences)
+  );
+}
+
+function topEvidence(
+  analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>,
+): Combination | ProfessionalPattern | null {
+  const directionEvidence = [
+    ...analysis.matched.filter(
+      (combination) => combination.direction === analysis.direction,
+    ),
+    ...analysis.matchedPatterns.filter(
+      (pattern) => pattern.direction === analysis.direction,
+    ),
+  ].filter(
+    (evidence) =>
+      Number(evidence.bestTakeProfit) > 0 &&
+      Number(evidence.bestStopLoss) > 0,
+  );
+  return (
+    directionEvidence.sort((left, right) => evidenceScore(right) - evidenceScore(left))[0] ??
+    null
+  );
+}
+
+function topConfirmations(
+  row: TopRow,
+  analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>,
+) {
+  const confirmations: string[] = [];
+  const direction = analysis.direction;
+  const bullish = direction === "BUY";
+  if (
+    row.ema20 !== null &&
+    row.ema50 !== null &&
+    row.ema200 !== null &&
+    ((bullish && row.ema20 > row.ema50 && row.ema50 > row.ema200) ||
+      (!bullish && row.ema20 < row.ema50 && row.ema50 < row.ema200))
+  ) {
+    confirmations.push("EMA20/50/200 подтверждает тренд");
+  }
+  if (
+    row.rsi !== null &&
+    ((bullish && row.rsi < 45) || (!bullish && row.rsi > 55))
+  ) {
+    confirmations.push(`RSI подтверждает направление (${formatNumber(row.rsi, 1)})`);
+  }
+  if (
+    row.macdHist !== null &&
+    ((bullish && row.macdHist > 0) || (!bullish && row.macdHist < 0))
+  ) {
+    confirmations.push("MACD подтверждает направление");
+  }
+  if (row.adx !== null && row.adx >= 20) {
+    confirmations.push(`ADX показывает тренд (${formatNumber(row.adx, 1)})`);
+  }
+  if (row.relativeVolume !== null && row.relativeVolume >= 1.2) {
+    confirmations.push(
+      `относительный объём выше среднего (${formatNumber(row.relativeVolume, 2)}x)`,
+    );
+  }
+  if (
+    analysis.marketStructure.support !== null ||
+    analysis.marketStructure.resistance !== null
+  ) {
+    confirmations.push("рядом есть исторический уровень");
+  }
+  if (analysis.marketStructure.correlation !== null) {
+    confirmations.push(
+      `корреляция с IMOEX ${formatNumber(analysis.marketStructure.correlation, 2)}`,
+    );
+  }
+  return [
+    ...confirmations,
+    `${analysis.matched.length} исторических комбинаций факторов`,
+    `${analysis.matchedPatterns.length} подтверждённых паттернов`,
+  ];
+}
+
+function topRating(
+  row: TopRow,
+  analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>,
+  evidence: Combination | ProfessionalPattern,
+) {
+  const winRate = evidence.successRate ?? 0;
+  const profitFactor = evidence.profitFactor ?? 0;
+  const expectancy =
+    "expectancy" in evidence
+      ? evidence.expectancy ?? 0
+      : evidence.expectedValue ?? 0;
+  const testWinRate =
+    "testWinRate" in evidence ? evidence.testWinRate ?? winRate : winRate;
+  const confirmationCount =
+    analysis.matched.length +
+    analysis.matchedPatterns.length +
+    (analysis.marketStructure.support !== null ? 1 : 0) +
+    (analysis.marketStructure.resistance !== null ? 1 : 0);
+  const trendPoints =
+    row.ema20 !== null &&
+    row.ema50 !== null &&
+    row.ema200 !== null &&
+    ((analysis.direction === "BUY" &&
+      row.ema20 > row.ema50 &&
+      row.ema50 > row.ema200) ||
+      (analysis.direction === "SELL" &&
+        row.ema20 < row.ema50 &&
+        row.ema50 < row.ema200))
+      ? 8
+      : 0;
+  const volumePoints =
+    row.relativeVolume !== null ? Math.min(5, Math.max(0, row.relativeVolume - 1) * 5) : 0;
+  const correlationPoints =
+    analysis.marketStructure.correlation !== null &&
+    ((analysis.direction === "BUY" && analysis.marketStructure.correlation > 0) ||
+      (analysis.direction === "SELL" && analysis.marketStructure.correlation < 0))
+      ? 4
+      : 0;
+  return Math.round(
+    Math.min(
+      100,
+      Math.max(
+        0,
+        analysis.confidence * 0.25 +
+          Math.min(100, winRate * 100) * 0.2 +
+          Math.min(100, testWinRate * 100) * 0.15 +
+          Math.min(10, profitFactor) * 1.5 +
+          Math.max(0, Math.min(15, expectancy * 4)) +
+          Math.min(15, confirmationCount * 1.5) +
+          trendPoints +
+          volumePoints +
+          correlationPoints,
+      ),
+    ),
+  );
+}
+
+async function getTopAnalysisStats() {
+  const result = await db.execute(sql`
+    SELECT
+      (SELECT COUNT(*)::int FROM moex_tickers WHERE is_active = true AND secid <> 'IMOEX') AS tickers,
+      (SELECT COUNT(*)::bigint FROM candles WHERE timeframe = ${TIMEFRAME}) AS candles,
+      (SELECT COUNT(*)::bigint FROM features) AS features,
+      (SELECT COUNT(*)::bigint FROM detected_patterns) AS detected_patterns,
+      (SELECT COUNT(*)::bigint FROM feature_combinations WHERE is_active = true AND statistical_significance = true) AS combinations,
+      (SELECT COUNT(*)::bigint FROM market_levels WHERE timeframe = ${TIMEFRAME}) AS levels,
+      (SELECT COUNT(*)::bigint FROM asset_correlations WHERE timeframe = ${TIMEFRAME}) AS correlations
+  `);
+  return result.rows[0] as Record<string, number | string | null>;
 }
 
 function helpText() {
@@ -1349,6 +1668,7 @@ async function marketText() {
 }
 
 async function topText() {
+  const startedAt = Date.now();
   const rows = await getTopRows();
   const context = await getSignalContext(
     rows
@@ -1361,28 +1681,141 @@ async function topText() {
       analysis: await analyzeSignalWithContext(row.ticker, row, context),
     })),
   );
-  const ranked = analyses
-    .filter(
-      ({ analysis }) =>
-        analysis.direction !== "HOLD" &&
-        (analysis.matched.length > 0 || analysis.matchedPatterns.length > 0),
+  const candidates: TopCandidate[] = [];
+  for (const item of analyses) {
+    if (item.analysis.direction === "HOLD") continue;
+    const evidence = topEvidence(item.analysis);
+    if (!evidence) continue;
+    const occurrences = evidence.occurrences ?? 0;
+    const winRate = evidence.successRate ?? 0;
+    const profitFactor = evidence.profitFactor ?? 0;
+    if (occurrences < 30 || winRate < 0.55 || profitFactor <= 1.2) continue;
+    const confirmations = topConfirmations(item.row, item.analysis);
+    candidates.push({
+      ...item,
+      evidence,
+      confirmations,
+      matchedFactorCount:
+        item.analysis.matched.length + item.analysis.matchedPatterns.length,
+      rating: topRating(item.row, item.analysis, evidence),
+    });
+  }
+  const ranked = candidates
+    .sort(
+      (left, right) =>
+        right.rating - left.rating ||
+        evidenceScore(right.evidence) - evidenceScore(left.evidence),
     )
-    .sort((left, right) => right.analysis.confidence - left.analysis.confidence)
-    .slice(0, 10);
+    .slice(0, 5);
 
   if (!ranked.length) {
-    return "Сейчас нет сигналов с достаточным подтверждением.";
+    return [
+      "🔥 Лучшие сигналы",
+      "",
+      "Сейчас нет акций, которые одновременно проходят фильтры:",
+      "• минимум 30 исторических наблюдений",
+      "• Win Rate не ниже 55%",
+      "• Profit Factor выше 1,2",
+      "• статистическая значимость и подтверждённый TP/SL",
+      "",
+      "После загрузки свежих свечей запустите «🔄 Обновить исследование».",
+    ].join("\n");
   }
 
+  const stats = await getTopAnalysisStats();
+  const formatCount = (value: number | string | null | undefined) =>
+    value === null || value === undefined
+      ? "—"
+      : Number(value).toLocaleString("ru-RU");
+  const blocks = ranked.map((candidate, index) => {
+    const { row, analysis, evidence } = candidate;
+    const entry = row.close;
+    const risk = Math.abs(entry - analysis.stop);
+    const reward = Math.abs(analysis.target - entry);
+    const riskReward = risk > 0 ? reward / risk : null;
+    const evidenceWinRate = evidence.successRate ?? 0;
+    const evidenceExpectancy =
+      "expectancy" in evidence
+        ? evidence.expectancy
+        : evidence.expectedValue;
+    const evidenceTestWinRate =
+      "testWinRate" in evidence ? evidence.testWinRate : null;
+    const evidencePValue =
+      "pValue" in evidence ? evidence.pValue : null;
+    const evidenceQValue =
+      "qValue" in evidence ? evidence.qValue : null;
+    const evidenceConfidenceHigh =
+      "confidenceHigh" in evidence ? evidence.confidenceHigh : null;
+    const source =
+      "patternType" in evidence
+        ? `Паттерн: ${evidence.patternType}`
+        : `Комбинация: ${evidence.conditions
+            .map((condition) => String(condition.label ?? condition.key ?? "фактор"))
+            .join(" + ")}`;
+    return [
+      `${index + 1}. 📈 ${row.ticker} — ${directionLabel(analysis.direction)}`,
+      `Общий рейтинг: ${candidate.rating}/100`,
+      `Уверенность: ${analysis.confidence}%`,
+      `Вход: ${formatNumber(entry)}`,
+      `Стоп: ${formatNumber(analysis.stop)} · Тейк: ${formatNumber(analysis.target)}`,
+      `Risk/Reward: 1 : ${formatNumber(riskReward, 2)}`,
+      `Горизонт: ${analysis.horizonMinutes} минут`,
+      "",
+      "Историческая статистика:",
+      `• ${source}`,
+      `• Появлений: ${formatCount(evidence.occurrences)}`,
+      `• Win Rate: ${formatNumber(evidenceWinRate * 100, 2)}%`,
+      `• Test Win Rate: ${formatNumber(
+        evidenceTestWinRate !== null ? evidenceTestWinRate * 100 : null,
+        2,
+      )}%`,
+      `• Profit Factor: ${formatNumber(evidence.profitFactor)}`,
+      `• Expectancy: ${formatNumber(evidenceExpectancy, 4)}%`,
+      `• Средняя прибыль/убыток: ${formatNumber(evidence.averageProfit, 4)}% / ${formatNumber(evidence.averageLoss, 4)}%`,
+      `• Просадка: ${formatNumber(evidence.maxDrawdown, 4)}%`,
+      `• Лучший TP/SL: ${formatNumber(evidence.bestTakeProfit)}% / ${formatNumber(evidence.bestStopLoss)}%`,
+      `• p-value/q-value: ${formatNumber(evidencePValue, 6)} / ${formatNumber(evidenceQValue, 6)}`,
+      `• Доверительный интервал: ${formatNumber(
+        evidence.confidenceLow !== null && evidence.confidenceLow !== undefined
+          ? evidence.confidenceLow * 100
+          : null,
+        2,
+      )}%–${formatNumber(
+        evidenceConfidenceHigh !== null && evidenceConfidenceHigh !== undefined
+          ? evidenceConfidenceHigh * 100
+          : null,
+        2,
+      )}%`,
+      "",
+      `Подтверждений: ${candidate.matchedFactorCount}`,
+      ...candidate.confirmations.slice(0, 8).map((reason) => `• ${reason}`),
+      analysis.marketStructure.support !== null
+        ? `• Поддержка: ${formatNumber(analysis.marketStructure.support)} (сила ${formatNumber(analysis.marketStructure.supportStrength)})`
+        : null,
+      analysis.marketStructure.resistance !== null
+        ? `• Сопротивление: ${formatNumber(analysis.marketStructure.resistance)} (сила ${formatNumber(analysis.marketStructure.resistanceStrength)})`
+        : null,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
+  });
+
   return [
-    "🔥 Лучшие текущие сигналы",
+    "🔥 Лучшие сигналы — realtime-анализ IMOEX",
     "",
-    ...ranked.map(
-      ({ row, analysis }, index) =>
-        `${index + 1}. ${row.ticker} ${analysis.direction} ${analysis.confidence}% · ${formatNumber(row.close)}`,
-    ),
+    ...blocks.flatMap((block) => [block, ""]),
+    "📊 Статистика работы AI:",
+    `• Акций проанализировано: ${formatCount(stats.tickers)}`,
+    `• Свечей: ${formatCount(stats.candles)}`,
+    `• Признаков: ${formatCount(stats.features)}`,
+    `• Найденных паттернов: ${formatCount(stats.detected_patterns)}`,
+    `• Статистически значимых комбинаций: ${formatCount(stats.combinations)}`,
+    `• Уровней: ${formatCount(stats.levels)}`,
+    `• Корреляций: ${formatCount(stats.correlations)}`,
+    `• Время анализа: ${formatNumber((Date.now() - startedAt) / 1000, 1)} сек.`,
     "",
-    "Для деталей: /signal ТИКЕР",
+    "Для детального сигнала: /signal ТИКЕР",
+    "Это статистический исследовательский сигнал, не финансовая рекомендация.",
   ].join("\n");
 }
 
@@ -1433,6 +1866,20 @@ async function sleep(milliseconds: number) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function splitTelegramText(text: string, maxLength = 3900) {
+  if (text.length <= maxLength) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > maxLength) {
+    const boundary = rest.lastIndexOf("\n", maxLength);
+    const cutAt = boundary > 500 ? boundary : maxLength;
+    chunks.push(rest.slice(0, cutAt));
+    rest = rest.slice(cutAt).replace(/^\n+/, "");
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
 function createTelegramClient(token: string) {
   async function call<T>(
     method: string,
@@ -1471,16 +1918,21 @@ function createTelegramClient(token: string) {
         },
         signal,
       ),
-    sendMessage: (
+    sendMessage: async (
       chatId: number,
       text: string,
       replyMarkup: Record<string, unknown> = TELEGRAM_MENU,
-    ) =>
-      call("sendMessage", {
-        chat_id: chatId,
-        text,
-        reply_markup: JSON.stringify(replyMarkup),
-      }),
+    ) => {
+      let result: unknown;
+      for (const chunk of splitTelegramText(text)) {
+        result = await call("sendMessage", {
+          chat_id: chatId,
+          text: chunk,
+          reply_markup: JSON.stringify(replyMarkup),
+        });
+      }
+      return result;
+    },
   };
 }
 
