@@ -38,3 +38,9 @@ The market analog scanner is a separate Telegram flow and persists full-market s
 **Why:** Analog analysis is a parallel research view over all IMOEX stocks, not a replacement for the existing signal engine.
 
 **How to apply:** Keep analog matching, LONG/SHORT outcome aggregation, and its button/command isolated from the core signal handlers.
+
+Analog reports use the snapshot timestamp as the run key; refresh that run's match rows before saving so repeated scans do not accumulate stale analogs.
+
+**Why:** Re-running the scanner at one current timestamp otherwise mixes old and new matches and makes the per-stock 15-case statistics incorrect.
+
+**How to apply:** Treat the current snapshot as a replaceable result set, while retaining older snapshot dates for history.
