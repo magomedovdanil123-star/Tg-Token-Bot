@@ -64,6 +64,7 @@ async function refreshLevels() {
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS row_number
       FROM candles
       WHERE timeframe = '${TIMEFRAME}'
+        AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
     )
     SELECT
       ticker, close,
@@ -129,6 +130,7 @@ async function refreshCorrelations() {
         ), 0)) AS asset_return
       FROM candles
       WHERE timeframe = '${TIMEFRAME}'
+        AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
         AND close > 0
     ),
     aligned AS (
@@ -143,6 +145,7 @@ async function refreshCorrelations() {
         ON benchmark.ticker = 'IMOEX'
         AND benchmark.timestamp = asset.timestamp
       WHERE asset.ticker <> 'IMOEX'
+          AND asset.ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
         AND asset.asset_return IS NOT NULL
         AND benchmark.asset_return IS NOT NULL
     ),

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { db, patterns, pool } from "@workspace/db";
+import { db, moexTickers, patterns, pool } from "@workspace/db";
 
 const TIMEFRAME = "10m";
 const MIN_OCCURRENCES = 30;
@@ -35,6 +35,9 @@ function eventCtes() {
       INNER JOIN features f
         ON f.ticker = c.ticker
         AND f.timestamp = c.timestamp
+      INNER JOIN moex_tickers universe
+        ON universe.secid = c.ticker
+        AND universe.is_active = true
       WHERE c.timeframe = '${TIMEFRAME}'
     ),
     events AS (

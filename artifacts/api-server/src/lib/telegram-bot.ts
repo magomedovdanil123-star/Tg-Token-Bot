@@ -217,7 +217,13 @@ async function getLatestFeature(ticker: string): Promise<LatestFeature | null> {
         eq(candles.timestamp, features.timestamp),
       ),
     )
-    .where(eq(features.ticker, ticker))
+    .innerJoin(moexTickers, eq(moexTickers.secid, features.ticker))
+    .where(
+      and(
+        eq(features.ticker, ticker),
+        eq(moexTickers.isActive, true),
+      ),
+    )
     .orderBy(desc(features.timestamp))
     .limit(1);
   return result[0] ?? null;
@@ -662,6 +668,7 @@ function helpText() {
     "",
     "Команды:",
     "/signal SBER — сигнал по тикеру",
+    "/imoex — состав индекса IMOEX",
     "/market — состояние IMOEX",
     "/top — лучшие текущие сигналы",
     "/help — справка",
@@ -670,10 +677,43 @@ function helpText() {
   ].join("\n");
 }
 
+async function imoexText() {
+  const rows = await db
+    .select({
+      ticker: moexTickers.secid,
+      shortName: moexTickers.shortName,
+    })
+    .from(moexTickers)
+    .where(eq(moexTickers.isActive, true))
+    .orderBy(asc(moexTickers.rank));
+
+  if (!rows.length) {
+    return "Состав IMOEX пока недоступен.";
+  }
+
+  return [
+    `📋 Акции индекса IMOEX: ${rows.length}`,
+    "",
+    ...rows.map(
+      (row, index) =>
+        `${index + 1}. ${row.ticker}${row.shortName ? ` — ${row.shortName}` : ""}`,
+    ),
+    "",
+    "Бот анализирует только этот список.",
+  ].join("\n");
+}
+
 async function signalText(ticker: string) {
   const feature = await getLatestFeature(ticker);
   if (!feature) {
-    return `Не нашёл данные по ${ticker}.\nПроверьте тикер, например: /signal SBER`;
+    const knownTicker = await db
+      .select({ ticker: moexTickers.secid })
+      .from(moexTickers)
+      .where(eq(moexTickers.secid, ticker))
+      .limit(1);
+    return knownTicker.length
+      ? `${ticker} сейчас не входит в активный состав IMOEX или по нему нет свежих данных.`
+      : `${ticker} не входит в текущий состав IMOEX.\nСписок: /imoex`;
   }
 
   const analysis = await analyzeSignal(ticker, feature);
@@ -787,6 +827,9 @@ async function handleMessage(chatId: number, text: string) {
   if (normalizedText === "помощь") {
     return helpText();
   }
+  if (normalizedCommand === "/imoex" || normalizedText === "состав") {
+    return imoexText();
+  }
   if (normalizedCommand === "/market") {
     return marketText();
   }
@@ -875,6 +918,7 @@ export function startTelegramBot() {
       await client.setMyCommands(
         JSON.stringify([
           { command: "signal", description: "Сигнал по тикеру" },
+          { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
           { command: "top", description: "Лучшие сигналы" },
           { command: "help", description: "Справка" },

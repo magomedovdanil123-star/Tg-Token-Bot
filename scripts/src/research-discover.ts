@@ -179,6 +179,9 @@ async function evaluate(
       INNER JOIN features f
         ON f.ticker = c.ticker
         AND f.timestamp = c.timestamp
+      INNER JOIN moex_tickers universe
+        ON universe.secid = c.ticker
+        AND universe.is_active = true
       WHERE c.timeframe = '${TIMEFRAME}'
     ),
     matched AS (
@@ -339,6 +342,9 @@ async function evaluateAll(
       INNER JOIN features f
         ON f.ticker = c.ticker
         AND f.timestamp = c.timestamp
+      INNER JOIN moex_tickers universe
+        ON universe.secid = c.ticker
+        AND universe.is_active = true
       WHERE c.timeframe = '${TIMEFRAME}'
     ),
     trade_rows AS (

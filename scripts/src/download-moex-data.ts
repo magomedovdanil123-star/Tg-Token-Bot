@@ -85,31 +85,41 @@ async function fetchMoex(
   throw new Error(`MOEX request failed: ${path}`);
 }
 
-async function getLiquidTickers(limit: number) {
+async function getIMOEXTickers() {
   const response = await fetchMoex(
-    "/engines/stock/markets/shares/boards/TQBR/securities.json",
+    "/statistics/engines/stock/markets/index/analytics/IMOEX.json",
     {
-      "iss.only": "securities",
-      "securities.columns": "SECID,SHORTNAME,SECNAME,SECTYPE,ISSUECAPITALIZATION",
-      limit: 300,
+      limit: 1000,
     },
   );
-  return blockRows(response, "securities")
+  const rows = blockRows(response, "analytics");
+  const unique = new Map<
+    string,
+    {
+      secid: string;
+      shortName: string | null;
+      weight: number;
+    }
+  >();
+  for (const row of rows) {
+    const secid = String(row.secids ?? row.ticker ?? "").trim();
+    if (!secid || secid === "null" || secid === "IMOEX") continue;
+    const weight = numeric(row.weight) ?? 0;
+    if (!unique.has(secid)) {
+      unique.set(secid, {
+        secid,
+        shortName: row.shortnames ? String(row.shortnames) : null,
+        weight,
+      });
+    }
+  }
+  return [...unique.values()]
+    .sort((left, right) => right.weight - left.weight)
     .map((row) => ({
-      secid: String(row.secid ?? ""),
-      shortName: row.shortname ? String(row.shortname) : null,
-      securityType: row.sectype ? String(row.sectype) : null,
-      capitalization: numeric(row.issuecapitalization),
-    }))
-    .filter(
-      (row) =>
-        row.secid &&
-        row.secid !== "null" &&
-        // SECTYPE "1" is a share; ETF/fund rows use "J" and are excluded.
-        row.securityType === "1",
-    )
-    .sort((a, b) => (b.capitalization ?? 0) - (a.capitalization ?? 0))
-    .slice(0, limit);
+      secid: row.secid,
+      shortName: row.shortName,
+      capitalization: undefined,
+    }));
 }
 
 async function getCandles(
@@ -604,6 +614,21 @@ async function saveTicker(
 }
 
 async function main() {
+  if (arg("sync-index-only", "false") === "true") {
+    const tickers = await getIMOEXTickers();
+    if (tickers.length === 0) {
+      throw new Error("MOEX вернул пустой состав IMOEX; база не изменена");
+    }
+    await db.update(moexTickers).set({ isActive: false });
+    for (let index = 0; index < tickers.length; index += 1) {
+      await saveTicker(tickers[index], index + 1);
+    }
+    console.log(`Состав IMOEX синхронизирован: ${tickers.length} акций`);
+    console.log(tickers.map((ticker) => ticker.secid).join(", "));
+    await pool.end();
+    return;
+  }
+
   if (arg("features-only", "false") === "true") {
     const featuresStart = integerArg("features-start", 0);
     const featuresLimit = integerArg("features-limit", 1000);
@@ -611,6 +636,8 @@ async function main() {
       await db
         .selectDistinct({ ticker: candles.ticker })
         .from(candles)
+        .innerJoin(moexTickers, eq(moexTickers.secid, candles.ticker))
+        .where(eq(moexTickers.isActive, true))
         .orderBy(asc(candles.ticker))
     ).slice(featuresStart, featuresStart + featuresLimit);
     let refreshed = 0;
@@ -659,8 +686,11 @@ async function main() {
       .set({ status: "running", finishedAt: null, errorMessage: null })
       .where(eq(downloadRuns.id, runId!));
 
-    console.log(`Получаю топ-${maxTickers} акций MOEX...`);
-    const allTickers = await getLiquidTickers(Math.min(100, startRank + maxTickers));
+    console.log("Получаю официальный состав индекса IMOEX...");
+    const allTickers = await getIMOEXTickers();
+    if (allTickers.length === 0) {
+      throw new Error("MOEX вернул пустой состав IMOEX; импорт остановлен");
+    }
     const tickers = allTickers.slice(startRank, startRank + maxTickers);
     console.log(`Найдено тикеров: ${tickers.length}`);
     // Keep the persisted universe aligned with the current MOEX share list.

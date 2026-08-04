@@ -9,7 +9,8 @@ Stores MOEX market candles, technical indicators, market context, and research r
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/scripts run download-moex` — load two years of 10-minute MOEX data for the top 100 shares
+- `pnpm --filter @workspace/scripts run download-moex` — load two years of 10-minute MOEX data for the current IMOEX constituents
+- `pnpm --filter @workspace/scripts run download-moex -- --sync-index-only=true` — sync the current official IMOEX constituent list without deleting historical candles
 - `pnpm --filter @workspace/scripts run download-context` — load daily IMOEX, RTSI, USD/RUB, EUR/RUB, and CNY/RUB context rows
 - `pnpm --filter @workspace/scripts run refresh-features` — recalculate and update all stored feature rows after schema/indicator changes
 - `pnpm --filter @workspace/scripts run refresh-features -- --features-start=45 --features-limit=20` — refresh a bounded ticker range
@@ -46,7 +47,7 @@ Stores MOEX market candles, technical indicators, market context, and research r
 
 ## Product
 
-- PostgreSQL storage for ranked MOEX tickers and 10-minute candles.
+- PostgreSQL storage for the current official IMOEX constituent list and 10-minute candles.
 - Derived trend, momentum, volatility, candle, volume, Bollinger, MACD, RSI, ATR, VWAP, OBV, MFI, CCI, and Williams %R features.
 - Separate market context, macro, pattern, signal, strategy, and backtest tables for the research engine.
 
