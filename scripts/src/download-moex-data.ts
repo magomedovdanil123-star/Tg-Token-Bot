@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import {
   candles,
   db,
@@ -38,6 +38,10 @@ function arg(name: string, fallback: string): string {
 function integerArg(name: string, fallback: number): number {
   const value = Number(arg(name, String(fallback)));
   return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function booleanArg(name: string, fallback = false): boolean {
+  return arg(name, String(fallback)) === "true";
 }
 
 function numeric(value: unknown): number | undefined {
@@ -544,8 +548,16 @@ async function saveCandles(rows: CandleRow[]) {
     const saved = await db
       .insert(candles)
       .values(batch.map((row) => ({ ...row, timeframe: TIMEFRAME })))
-      .onConflictDoNothing({
+      .onConflictDoUpdate({
         target: [candles.ticker, candles.timeframe, candles.timestamp],
+        set: {
+          open: sql.raw('excluded."open"'),
+          high: sql.raw('excluded."high"'),
+          low: sql.raw('excluded."low"'),
+          close: sql.raw('excluded."close"'),
+          volume: sql.raw('excluded."volume"'),
+          value: sql.raw('excluded."value"'),
+        },
       })
       .returning({ id: candles.id });
     inserted += saved.length;
@@ -553,15 +565,8 @@ async function saveCandles(rows: CandleRow[]) {
   return inserted;
 }
 
-async function calculateFeatures(ticker: string) {
-  const rows = await db
-    .select()
-    .from(candles)
-    .where(and(eq(candles.ticker, ticker), eq(candles.timeframe, TIMEFRAME)))
-    .orderBy(asc(candles.timestamp));
-  if (rows.length < 2) return 0;
-
-  const calculated = featureRows(rows);
+async function upsertCalculatedFeatures(calculated: ReturnType<typeof featureRows>) {
+  if (!calculated.length) return 0;
   const excluded = (column: string) => sql.raw(`excluded."${column}"`);
   let inserted = 0;
   for (let index = 0; index < calculated.length; index += 500) {
@@ -634,6 +639,30 @@ async function calculateFeatures(ticker: string) {
     inserted += saved.length;
   }
   return inserted;
+}
+
+async function calculateFeatures(ticker: string) {
+  const rows = await db
+    .select()
+    .from(candles)
+    .where(and(eq(candles.ticker, ticker), eq(candles.timeframe, TIMEFRAME)))
+    .orderBy(asc(candles.timestamp));
+  if (rows.length < 2) return 0;
+
+  return upsertCalculatedFeatures(featureRows(rows));
+}
+
+async function calculateLatestFeature(ticker: string) {
+  const rows = await db
+    .select()
+    .from(candles)
+    .where(and(eq(candles.ticker, ticker), eq(candles.timeframe, TIMEFRAME)))
+    .orderBy(desc(candles.timestamp))
+    .limit(260);
+  if (rows.length < 2) return 0;
+  rows.reverse();
+  const calculated = featureRows(rows);
+  return upsertCalculatedFeatures(calculated.slice(-1));
 }
 
 async function saveTicker(
@@ -728,6 +757,87 @@ async function main() {
     console.log(
       `Готово. Обновлено признаков: ${refreshed}. Обработано тикеров: ${finalTickerRows.length}`,
     );
+    await pool.end();
+    return;
+  }
+
+  if (booleanArg("latest-only")) {
+    const allTickers = await getIMOEXTickers();
+    if (allTickers.length === 0) {
+      throw new Error("MOEX вернул пустой состав IMOEX; быстрый импорт остановлен");
+    }
+    await db.update(moexTickers).set({ isActive: false });
+    for (let index = 0; index < allTickers.length; index += 1) {
+      await saveTicker(allTickers[index], index + 1);
+    }
+
+    const end = new Date();
+    const start = new Date(end.getTime() - 5 * 24 * 60 * 60 * 1000);
+    const startDate = start.toISOString().slice(0, 10);
+    const endDate = end.toISOString().slice(0, 10);
+    let tickersProcessed = 0;
+    let candlesLoaded = 0;
+    let featuresCalculated = 0;
+    const errors: string[] = [];
+
+    for (const ticker of allTickers) {
+      try {
+        const rows = await getCandles(ticker.secid, startDate, endDate);
+        candlesLoaded += await saveCandles(rows);
+        featuresCalculated += await calculateLatestFeature(ticker.secid);
+        tickersProcessed += 1;
+      } catch (error) {
+        errors.push(
+          `${ticker.secid}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      await sleep(REQUEST_DELAY_MS);
+    }
+
+    try {
+      const indexRows = await getCandles(
+        "IMOEX",
+        startDate,
+        endDate,
+        "stock",
+        "index",
+        "SNDX",
+      );
+      candlesLoaded += await saveCandles(indexRows);
+      featuresCalculated += await calculateLatestFeature("IMOEX");
+      if (indexRows.length > 0) {
+        await db
+          .insert(marketContext)
+          .values(
+            indexRows.map((row) => ({
+              timestamp: row.timestamp,
+              imoexPrice: row.close,
+              imoexChange: row.open
+                ? ((row.close - row.open) / row.open) * 100
+                : undefined,
+              imoexVolume: row.volume,
+            })),
+          )
+          .onConflictDoUpdate({
+            target: marketContext.timestamp,
+            set: {
+              imoexPrice: sql.raw('excluded."imoex_price"'),
+              imoexChange: sql.raw('excluded."imoex_change"'),
+              imoexVolume: sql.raw('excluded."imoex_volume"'),
+            },
+          });
+      }
+    } catch (error) {
+      errors.push(`IMOEX: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    console.log(
+      `Актуальные данные обновлены. Тикеров: ${tickersProcessed}; свечей: ${candlesLoaded}; признаков: ${featuresCalculated}; ошибок: ${errors.length}`,
+    );
+    if (errors.length) {
+      console.error(errors.slice(0, 10).join("\n"));
+      process.exitCode = 1;
+    }
     await pool.end();
     return;
   }

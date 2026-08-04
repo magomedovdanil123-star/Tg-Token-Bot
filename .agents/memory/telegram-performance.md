@@ -26,3 +26,9 @@ The TOP response is intentionally an actionable compact signal: current entry, l
 **Why:** The user needs a practical one-hour-style forecast rather than a diagnostic dump of every research block.
 
 **How to apply:** Keep the full research engine behind the calculation, but keep `/top` output short; use `—` only when the database truly has no historical value.
+
+`/top` must refresh the latest MOEX candles before calculating signals; reading the latest persisted row alone can produce a valid historical signal with an already-stale entry price.
+
+**Why:** The bot previously reported an old entry while the market price had already moved materially.
+
+**How to apply:** Run a lightweight latest-only import for the active IMOEX universe, update the current candle/features, then analyze; if refresh fails, do not send stale entries.

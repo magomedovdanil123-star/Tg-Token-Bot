@@ -50,6 +50,7 @@ const TELEGRAM_MENU = {
   is_persistent: true,
 };
 let researchRefreshRunning = false;
+let latestMarketRefresh: Promise<void> | null = null;
 
 type TelegramUpdate = {
   update_id: number;
@@ -1895,6 +1896,49 @@ function startResearchRefresh(notify: (text: string) => Promise<unknown>) {
   return { started: true, completion };
 }
 
+function refreshLatestMarketData() {
+  if (latestMarketRefresh) return latestMarketRefresh;
+  latestMarketRefresh = new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      "pnpm",
+      [
+        "--filter",
+        "@workspace/scripts",
+        "run",
+        "download-moex",
+        "--",
+        "--latest-only=true",
+      ],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    child.stdout.on("data", (chunk: Buffer) => {
+      logger.info({ output: chunk.toString().trim() }, "Latest MOEX refresh output");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      logger.warn({ output: chunk.toString().trim() }, "Latest MOEX refresh error output");
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `Актуальное обновление MOEX завершилось с кодом ${code ?? "нет"}${signal ? ` (${signal})` : ""}`,
+          ),
+        );
+      }
+    });
+  }).finally(() => {
+    latestMarketRefresh = null;
+  });
+  return latestMarketRefresh;
+}
+
 async function imoexText() {
   const rows = await db
     .select({
@@ -2005,6 +2049,18 @@ async function marketText() {
 async function topText() {
   const startedAt = Date.now();
   cachedSignalContext = null;
+  try {
+    await refreshLatestMarketData();
+  } catch (error) {
+    logger.error({ err: error }, "Latest MOEX refresh failed before TOP analysis");
+    return [
+      "🔥 Лучшие сигналы IMOEX",
+      "",
+      "Не удалось получить свежие свечи MOEX.",
+      "Старые данные не использую, чтобы не отправлять устаревший вход.",
+      "Попробуйте нажать «🔥 Лучшие сигналы» ещё раз через несколько секунд.",
+    ].join("\n");
+  }
   const rows = await getTopRows();
   const context = await getSignalContext(
     rows
