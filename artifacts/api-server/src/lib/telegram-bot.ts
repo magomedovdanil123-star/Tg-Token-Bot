@@ -2353,6 +2353,7 @@ export function startTelegramBot() {
           { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
           { command: "top", description: "Лучшие сигналы" },
+          { command: "analogs", description: "Аналогичные рыночные ситуации" },
           { command: "refresh", description: "Обновить данные и исследование" },
           { command: "help", description: "Справка" },
         ]),

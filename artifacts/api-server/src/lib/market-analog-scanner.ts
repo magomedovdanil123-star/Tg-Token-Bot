@@ -65,7 +65,24 @@ type StockAnalogStat = {
   ticker: string;
   cases: number;
   upCases: number;
+  downCases: number;
   average5d: number | null;
+  maxUp5d: number | null;
+  maxDown5d: number | null;
+  stddev5d: number | null;
+  stability: "Высокая" | "Средняя" | "Низкая";
+};
+
+type StockAnalogMatch = {
+  ticker: string;
+  historicalDate: Date;
+  similarity: number;
+  priceAtAnalogue: number | null;
+  price1d: number | null;
+  price5d: number | null;
+  result1d: number | null;
+  result5d: number | null;
+  direction: "LONG" | "SHORT" | "нет данных";
 };
 
 function numeric(value: unknown): number | null {
@@ -137,6 +154,30 @@ async function ensureSchema() {
   await db.execute(sql`
     CREATE UNIQUE INDEX IF NOT EXISTS analog_matches_current_history_uq
       ON analog_matches (snapshot_date, historical_date)
+  `);
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS analog_stock_matches (
+      id BIGSERIAL PRIMARY KEY,
+      snapshot_date TIMESTAMPTZ NOT NULL,
+      historical_date TIMESTAMPTZ NOT NULL,
+      ticker VARCHAR(32) NOT NULL,
+      similarity_score DOUBLE PRECISION NOT NULL,
+      price_at_analogue DOUBLE PRECISION,
+      price_1d DOUBLE PRECISION,
+      price_5d DOUBLE PRECISION,
+      result_1d DOUBLE PRECISION,
+      result_5d DOUBLE PRECISION,
+      direction VARCHAR(8),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS analog_stock_matches_uq
+      ON analog_stock_matches (snapshot_date, historical_date, ticker)
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS analog_stock_matches_snapshot_ticker_idx
+      ON analog_stock_matches (snapshot_date, ticker)
   `);
 }
 
@@ -440,20 +481,35 @@ async function saveMatches(currentDate: Date, matches: AnalogMatch[]) {
   }
 }
 
-async function loadStockStats(currentDate: Date): Promise<StockAnalogStat[]> {
-  const result = await db.execute(sql`
-    WITH analogs AS (
-      SELECT historical_date
-      FROM analog_matches
-      WHERE snapshot_date = ${currentDate}
+async function saveStockMatches(currentDate: Date) {
+  await db.execute(sql`
+    INSERT INTO analog_stock_matches (
+      snapshot_date, historical_date, ticker, similarity_score,
+      price_at_analogue, price_1d, price_5d, result_1d, result_5d, direction
     )
     SELECT
-      t.secid AS ticker,
-      COUNT(future.close)::int AS cases,
-      COUNT(*) FILTER (WHERE future.close > historical.close)::int AS "upCases",
-      AVG((future.close / NULLIF(historical.close, 0) - 1) * 100) AS "average5d"
-    FROM moex_tickers t
-    CROSS JOIN analogs a
+      ${currentDate},
+      a.historical_date,
+      t.secid,
+      a.similarity_score,
+      historical.close,
+      one_day.close,
+      five_day.close,
+      CASE
+        WHEN historical.close IS NULL OR historical.close = 0 OR one_day.close IS NULL THEN NULL
+        ELSE (one_day.close / historical.close - 1) * 100
+      END,
+      CASE
+        WHEN historical.close IS NULL OR historical.close = 0 OR five_day.close IS NULL THEN NULL
+        ELSE (five_day.close / historical.close - 1) * 100
+      END,
+      CASE
+        WHEN historical.close IS NULL OR historical.close = 0 OR five_day.close IS NULL THEN NULL
+        WHEN five_day.close >= historical.close THEN 'LONG'
+        ELSE 'SHORT'
+      END
+    FROM analog_matches a
+    CROSS JOIN moex_tickers t
     LEFT JOIN LATERAL (
       SELECT c.close
       FROM candles c
@@ -468,31 +524,155 @@ async function loadStockStats(currentDate: Date): Promise<StockAnalogStat[]> {
       FROM candles c
       WHERE c.ticker = t.secid
         AND c.timeframe = ${TIMEFRAME}
+        AND c.timestamp >= a.historical_date + INTERVAL '1 day'
+      ORDER BY c.timestamp
+      LIMIT 1
+    ) one_day ON true
+    LEFT JOIN LATERAL (
+      SELECT c.close
+      FROM candles c
+      WHERE c.ticker = t.secid
+        AND c.timeframe = ${TIMEFRAME}
         AND c.timestamp >= a.historical_date + INTERVAL '5 days'
       ORDER BY c.timestamp
       LIMIT 1
-    ) future ON true
-    WHERE t.is_active = true AND t.secid <> 'IMOEX'
-    GROUP BY t.secid
-    HAVING COUNT(future.close) >= 5
-    ORDER BY (COUNT(*) FILTER (WHERE future.close > historical.close)::double precision /
-      NULLIF(COUNT(future.close), 0)) DESC, AVG((future.close / NULLIF(historical.close, 0) - 1) * 100) DESC
-    LIMIT 5
+    ) five_day ON true
+    WHERE a.snapshot_date = ${currentDate}
+      AND t.is_active = true
+      AND t.secid <> 'IMOEX'
+    ON CONFLICT (snapshot_date, historical_date, ticker) DO UPDATE SET
+      similarity_score = EXCLUDED.similarity_score,
+      price_at_analogue = EXCLUDED.price_at_analogue,
+      price_1d = EXCLUDED.price_1d,
+      price_5d = EXCLUDED.price_5d,
+      result_1d = EXCLUDED.result_1d,
+      result_5d = EXCLUDED.result_5d,
+      direction = EXCLUDED.direction
   `);
-  return result.rows.map((row) => {
-    const record = row as Record<string, unknown>;
-    return {
-      ticker: String(record.ticker),
-      cases: Math.round(numeric(record.cases) ?? 0),
-      upCases: Math.round(numeric(record.upCases) ?? 0),
-      average5d: numeric(record.average5d),
-    };
-  });
+}
+
+async function loadStockMatches(currentDate: Date): Promise<StockAnalogMatch[]> {
+  const result = await db.execute(sql`
+    SELECT
+      ticker,
+      historical_date AS "historicalDate",
+      similarity_score AS similarity,
+      price_at_analogue AS "priceAtAnalogue",
+      price_1d AS "price1d",
+      price_5d AS "price5d",
+      result_1d AS "result1d",
+      result_5d AS "result5d",
+      direction
+    FROM analog_stock_matches
+    WHERE snapshot_date = ${currentDate}
+      AND result_5d IS NOT NULL
+    ORDER BY historical_date, ticker
+  `);
+  return result.rows
+    .map((row) => {
+      const record = row as Record<string, unknown>;
+      const historicalDate = asDate(record.historicalDate);
+      if (!historicalDate) return null;
+      const rawDirection = String(record.direction ?? "");
+      return {
+        ticker: String(record.ticker),
+        historicalDate,
+        similarity: numeric(record.similarity) ?? 0,
+        priceAtAnalogue: numeric(record.priceAtAnalogue),
+        price1d: numeric(record.price1d),
+        price5d: numeric(record.price5d),
+        result1d: numeric(record.result1d),
+        result5d: numeric(record.result5d),
+        direction:
+          rawDirection === "LONG" || rawDirection === "SHORT"
+            ? rawDirection
+            : "нет данных",
+      };
+    })
+    .filter((row): row is StockAnalogMatch => row !== null);
+}
+
+function buildStockStats(matches: StockAnalogMatch[]): StockAnalogStat[] {
+  const byTicker = new Map<string, StockAnalogMatch[]>();
+  for (const match of matches) {
+    const items = byTicker.get(match.ticker) ?? [];
+    items.push(match);
+    byTicker.set(match.ticker, items);
+  }
+
+  return [...byTicker.entries()]
+    .map(([ticker, items]) => {
+      const results = items
+        .map((item) => item.result5d)
+        .filter((value): value is number => value !== null && Number.isFinite(value));
+      const upCases = results.filter((value) => value > 0).length;
+      const downCases = results.filter((value) => value < 0).length;
+      const average5d = results.length
+        ? results.reduce((sum, value) => sum + value, 0) / results.length
+        : null;
+      const stddev5d =
+        results.length > 1 && average5d !== null
+          ? Math.sqrt(
+              results.reduce((sum, value) => sum + (value - average5d) ** 2, 0) /
+                results.length,
+            )
+          : 0;
+      const dominantProbability = results.length
+        ? Math.max(upCases, downCases) / results.length
+        : 0;
+      const stability: StockAnalogStat["stability"] =
+        results.length >= 10 && dominantProbability >= 0.7 && stddev5d <= 3
+          ? "Высокая"
+          : results.length >= 8 && dominantProbability >= 0.6
+            ? "Средняя"
+            : "Низкая";
+      return {
+        ticker,
+        cases: results.length,
+        upCases,
+        downCases,
+        average5d,
+        maxUp5d: results.length ? Math.max(...results) : null,
+        maxDown5d: results.length ? Math.min(...results) : null,
+        stddev5d,
+        stability,
+      };
+    })
+    .sort((left, right) => {
+      const leftProbability = left.cases
+        ? Math.max(left.upCases, left.downCases) / left.cases
+        : 0;
+      const rightProbability = right.cases
+        ? Math.max(right.upCases, right.downCases) / right.cases
+        : 0;
+      return rightProbability - leftProbability || Math.abs(right.average5d ?? 0) - Math.abs(left.average5d ?? 0);
+    });
 }
 
 function scenarioLabel(result: number | null) {
   if (result === null) return "нет данных";
   return result >= 0 ? "LONG" : "SHORT";
+}
+
+function signedNumber(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return `${value >= 0 ? "+" : ""}${formatNumber(value, digits)}`;
+}
+
+function stockProbability(stock: StockAnalogStat, direction: "LONG" | "SHORT") {
+  if (!stock.cases) return null;
+  const count = direction === "LONG" ? stock.upCases : stock.downCases;
+  return (count / stock.cases) * 100;
+}
+
+function formatStockStat(stock: StockAnalogStat) {
+  return [
+    `${stock.ticker}: аналогов ${stock.cases}`,
+    `рост ${stock.upCases}/${stock.cases} · падение ${stock.downCases}/${stock.cases}`,
+    `LONG ${formatNumber(stockProbability(stock, "LONG"), 0)}% · SHORT ${formatNumber(stockProbability(stock, "SHORT"), 0)}%`,
+    `среднее 5д ${signedNumber(stock.average5d)} · максимум ${signedNumber(stock.maxUp5d)} · минимум ${signedNumber(stock.maxDown5d)}`,
+    `стабильность: ${stock.stability}`,
+  ].join("\n");
 }
 
 export async function scanMarketAnalogues(): Promise<string> {
@@ -561,7 +741,9 @@ export async function scanMarketAnalogues(): Promise<string> {
     };
   });
   await saveMatches(currentDate, matches);
-  const stockStats = await loadStockStats(currentDate);
+  await saveStockMatches(currentDate);
+  const stockMatches = await loadStockMatches(currentDate);
+  const stockStats = buildStockStats(stockMatches);
   const fiveDayResults = matches
     .map((match) => match.result5d)
     .filter((value): value is number => value !== null);
@@ -575,6 +757,45 @@ export async function scanMarketAnalogues(): Promise<string> {
     : null;
   const average = (values: number[]) =>
     values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  const longCandidates = stockStats
+    .filter((stock) => stock.upCases > stock.downCases && (stockProbability(stock, "LONG") ?? 0) >= 50)
+    .sort(
+      (left, right) =>
+        (stockProbability(right, "LONG") ?? 0) - (stockProbability(left, "LONG") ?? 0) ||
+        (right.average5d ?? -Infinity) - (left.average5d ?? -Infinity),
+    )
+    .slice(0, 5);
+  const shortCandidates = stockStats
+    .filter((stock) => stock.downCases > stock.upCases && (stockProbability(stock, "SHORT") ?? 0) >= 50)
+    .sort(
+      (left, right) =>
+        (stockProbability(right, "SHORT") ?? 0) - (stockProbability(left, "SHORT") ?? 0) ||
+        (left.average5d ?? Infinity) - (right.average5d ?? Infinity),
+    )
+    .slice(0, 5);
+  const stockMatchesByDate = new Map<number, StockAnalogMatch[]>();
+  for (const stockMatch of stockMatches) {
+    const items = stockMatchesByDate.get(stockMatch.historicalDate.getTime()) ?? [];
+    items.push(stockMatch);
+    stockMatchesByDate.set(stockMatch.historicalDate.getTime(), items);
+  }
+  const detailedAnalogueReport = matches.flatMap((match, index) => {
+    const details = stockMatchesByDate.get(match.historicalDate.getTime()) ?? [];
+    const detailLines = details.map(
+      (stock) =>
+        `${stock.ticker}: тогда ${formatNumber(stock.priceAtAnalogue)} · 1д ${formatNumber(stock.price1d)} · 5д ${formatNumber(stock.price5d)} · результат ${signedNumber(stock.result5d)}% · ${stock.direction}`,
+    );
+    return [
+      "",
+      `ИСТОРИЧЕСКИЙ АНАЛОГ ${index + 1}`,
+      `Дата: ${formatDate(match.historicalDate)}`,
+      `Сходство: ${formatNumber(match.similarity, 0)}%`,
+      `Общий сценарий: ${scenarioLabel(match.result5d)}`,
+      `IMOEX: 1ч ${signedNumber(match.result1h)}% · 1д ${signedNumber(match.result1d)}% · 5д ${signedNumber(match.result5d)}%`,
+      "РАЗБОР 46 АКЦИЙ:",
+      ...detailLines,
+    ];
+  });
 
   return [
     "📊 АНАЛОГИЧНЫЕ РЫНОЧНЫЕ СИТУАЦИИ",
@@ -600,18 +821,41 @@ export async function scanMarketAnalogues(): Promise<string> {
     `Средний потенциал 5 дней: ${formatNumber(average(fiveDayResults))}%`,
     `Среднее падение 5 дней: ${formatNumber(average(shortResults))}%`,
     "",
-    "Похожие сценарии:",
-    ...matches.map(
-      (match, index) =>
-        `${index + 1}. ${formatDate(match.historicalDate)} · сходство ${formatNumber(match.similarity, 0)}% · ${scenarioLabel(match.result5d)} · 1ч ${formatNumber(match.result1h)}% · 1д ${formatNumber(match.result1d)}% · 5д ${formatNumber(match.result5d)}%`,
-    ),
+    "🧾 ПОДРОБНЫЙ РАЗБОР КАЖДОГО АНАЛОГА",
+    `Сохранено наблюдений: ${stockMatches.length} (${matches.length} аналогов × ${snapshot.length} акций)`,
+    ...detailedAnalogueReport,
     "",
-    "Лучшие акции по этим аналогам:",
-    ...stockStats.map(
-      (stock, index) =>
-        `${index + 1}. ${stock.ticker}: ${stock.upCases}/${stock.cases} рост · среднее 5д ${formatNumber(stock.average5d)}%`,
-    ),
+    "📋 СТАТИСТИКА ПО ВСЕМ АКЦИЯМ",
+    ...stockStats.flatMap((stock) => ["", formatStockStat(stock)]),
     "",
-    "Вывод: направление выбрано по большинству 5-дневных исходов аналогичных рыночных ситуаций.",
+    "🟢 ЛУЧШИЕ LONG КАНДИДАТЫ:",
+    ...(longCandidates.length
+      ? longCandidates.flatMap((stock, index) => [
+          "",
+          `${index + 1}. ${stock.ticker}`,
+          `Аналогов: ${stock.cases}`,
+          `Ростов: ${stock.upCases}`,
+          `Вероятность LONG: ${formatNumber(stockProbability(stock, "LONG"), 0)}%`,
+          `Среднее движение: ${signedNumber(stock.average5d)}%`,
+          `Максимальный рост: ${signedNumber(stock.maxUp5d)}%`,
+          `Стабильность: ${stock.stability}`,
+        ])
+      : ["нет устойчивых LONG-кандидатов"]),
+    "",
+    "🔴 ЛУЧШИЕ SHORT КАНДИДАТЫ:",
+    ...(shortCandidates.length
+      ? shortCandidates.flatMap((stock, index) => [
+          "",
+          `${index + 1}. ${stock.ticker}`,
+          `Аналогов: ${stock.cases}`,
+          `Падений: ${stock.downCases}`,
+          `Вероятность SHORT: ${formatNumber(stockProbability(stock, "SHORT"), 0)}%`,
+          `Среднее движение: ${signedNumber(stock.average5d)}%`,
+          `Максимальное падение: ${signedNumber(stock.maxDown5d)}%`,
+          `Стабильность: ${stock.stability}`,
+        ])
+      : ["нет устойчивых SHORT-кандидатов"]),
+    "",
+    `Вывод: рынок ${shortProbability !== null && longProbability !== null && shortProbability > longProbability ? "слабее, чем в среднем SHORT-сценариях" : "чаще рос в аналогичных условиях"}, но кандидаты отобраны отдельно по статистике каждой акции.`,
   ].join("\n");
 }
