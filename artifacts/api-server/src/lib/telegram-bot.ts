@@ -23,6 +23,21 @@ const TIMEFRAME = "10m";
 const POLL_TIMEOUT_SECONDS = 25;
 const REFRESH_BUTTON = "🔄 Обновить исследование";
 const SIGNAL_PICKER_BUTTON = "🎯 Сигнал по тикеру";
+const AI_SCORE_WEIGHTS = {
+  trend: 0.12,
+  momentum: 0.1,
+  volume: 0.06,
+  pattern: 0.14,
+  breakout: 0.05,
+  smc: 0.05,
+  structure: 0.08,
+  correlation: 0.05,
+  research: 0.16,
+  backtest: 0.12,
+  risk: 0.04,
+  marketContext: 0.03,
+} as const;
+const RESEARCH_ENGINE_VERSION = "engine-1";
 const TELEGRAM_MENU = {
   keyboard: [
     [REFRESH_BUTTON],
@@ -110,6 +125,14 @@ type LatestMarket = {
   imoexChange: number | null;
 };
 
+type MacroSnapshot = {
+  code: string;
+  category: string;
+  close: number | null;
+  changePercent: number | null;
+  timestamp: Date | null;
+};
+
 type TopRow = LatestFeature & { ticker: string };
 type SignalDirection = "BUY" | "SELL" | "HOLD";
 type Combination = {
@@ -134,6 +157,10 @@ type Combination = {
   pValue: number | null;
   qValue: number | null;
   bestHoldingMinutes: number | null;
+  sharpeRatio: number | null;
+  trainWinRate: number | null;
+  trainExpectedValue: number | null;
+  testProfitFactor: number | null;
   statisticalSignificance: boolean;
 };
 type HistoricalEvidence = {
@@ -205,7 +232,9 @@ type ProfessionalPattern = CandlePattern & {
   pValue: number | null;
   qValue: number | null;
   trainWinRate: number | null;
+  trainExpectancy: number | null;
   testWinRate: number | null;
+  testExpectancy: number | null;
   expectancy: number | null;
 };
 type MarketStructure = {
@@ -229,6 +258,7 @@ type SignalContext = {
     string,
     { correlation: number | null; sampleCount: number | null }
   >;
+  macro: MacroSnapshot[];
 };
 
 let cachedSignalContext: { value: SignalContext; expiresAt: number } | null =
@@ -539,6 +569,42 @@ async function getValidatedCombinations(): Promise<Combination[]> {
       testWinRate: featureCombinations.testWinRate,
       testExpectedValue: featureCombinations.testExpectedValue,
       pValue: featureCombinations.pValue,
+      sharpeRatio: sql<number | null>`
+        (
+          SELECT sr.sharpe_ratio
+          FROM strategy_results sr
+          WHERE sr.name = ${featureCombinations.name}
+            AND sr.version = ${RESEARCH_ENGINE_VERSION}
+          LIMIT 1
+        )
+      `,
+      trainWinRate: sql<number | null>`
+        (
+          SELECT sr.train_win_rate
+          FROM strategy_results sr
+          WHERE sr.name = ${featureCombinations.name}
+            AND sr.version = ${RESEARCH_ENGINE_VERSION}
+          LIMIT 1
+        )
+      `,
+      trainExpectedValue: sql<number | null>`
+        (
+          SELECT sr.train_expected_value
+          FROM strategy_results sr
+          WHERE sr.name = ${featureCombinations.name}
+            AND sr.version = ${RESEARCH_ENGINE_VERSION}
+          LIMIT 1
+        )
+      `,
+      testProfitFactor: sql<number | null>`
+        (
+          SELECT sr.test_profit_factor
+          FROM strategy_results sr
+          WHERE sr.name = ${featureCombinations.name}
+            AND sr.version = ${RESEARCH_ENGINE_VERSION}
+          LIMIT 1
+        )
+      `,
       qValue: sql<number | null>`
         (
           SELECT NULLIF(sr.metadata ->> 'qValue', '')::double precision
@@ -564,6 +630,36 @@ async function getValidatedCombinations(): Promise<Combination[]> {
     )
     .orderBy(desc(featureCombinations.expectedValue));
   return result as Combination[];
+}
+
+async function getLatestMacroContext(): Promise<MacroSnapshot[]> {
+  const result = await db.execute(sql`
+    SELECT
+      mi.code,
+      mi.category,
+      mo.close,
+      mo.change_percent AS "changePercent",
+      mo.timestamp
+    FROM market_instruments mi
+    INNER JOIN LATERAL (
+      SELECT close, change_percent, timestamp
+      FROM market_observations
+      WHERE instrument_id = mi.id
+      ORDER BY timestamp DESC
+      LIMIT 1
+    ) mo ON true
+    WHERE mi.is_active = true
+    ORDER BY mi.category, mi.code
+  `);
+  return (result.rows as unknown as MacroSnapshot[]).map((row) => ({
+    ...row,
+    timestamp:
+      row.timestamp instanceof Date
+        ? row.timestamp
+        : row.timestamp
+          ? new Date(row.timestamp as unknown as string)
+          : null,
+  }));
 }
 
 function matchesCombination(
@@ -706,7 +802,9 @@ async function getCurrentProfessionalPatterns(
       pValue: patternStatistics.pValue,
       qValue: patternStatistics.qValue,
       trainWinRate: patternStatistics.trainWinRate,
+      trainExpectancy: patternStatistics.trainExpectancy,
       testWinRate: patternStatistics.testWinRate,
+      testExpectancy: patternStatistics.testExpectancy,
       expectancy: patternStatistics.expectancy,
     })
     .from(detectedPatterns)
@@ -854,7 +952,7 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
   if (cachedSignalContext && cachedSignalContext.expiresAt > Date.now()) {
     return cachedSignalContext.value;
   }
-  const [combinations, patternRows, levelRows, correlationRows, thresholdsByTicker] =
+  const [combinations, patternRows, levelRows, correlationRows, thresholdsByTicker, macro] =
     await Promise.all([
       getValidatedCombinations(),
       db
@@ -894,6 +992,7 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
           ),
         ),
       getFactorThresholds(),
+      getLatestMacroContext(),
     ]);
   const volatilityMedian =
     median(volatilityValues) ?? (await getVolatilityMedian());
@@ -934,6 +1033,7 @@ async function getSignalContext(volatilityValues: number[] = []): Promise<Signal
     patternsByTicker,
     levelsByTicker,
     correlationsByTicker,
+    macro,
   };
   cachedSignalContext = {
     value: context,
@@ -1152,7 +1252,218 @@ type TopCandidate = {
   evidence: Combination | ProfessionalPattern;
   confirmations: string[];
   matchedFactorCount: number;
+  scoreBlocks: ScoreBlocks;
+  matchedPatterns: string[];
+  matchedFactors: string[];
+  backtest: Combination | null;
 };
+
+type ScoreBlocks = {
+  trend: number | null;
+  momentum: number | null;
+  volume: number | null;
+  pattern: number | null;
+  breakout: number | null;
+  smc: number | null;
+  structure: number | null;
+  correlation: number | null;
+  research: number | null;
+  backtest: number | null;
+  risk: number | null;
+  marketContext: number | null;
+};
+
+type BacktestEvidence = Combination;
+
+function clampScore(value: number) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function directionAgreement(direction: SignalDirection, value: number | null) {
+  if (value === null || !Number.isFinite(value) || direction === "HOLD") return null;
+  const signed = direction === "BUY" ? value : -value;
+  return clampScore(50 + signed * 50);
+}
+
+function macroPressure(macro: MacroSnapshot[]) {
+  const indexChanges = macro
+    .filter((item) => item.code === "IMOEX" || item.code === "RTSI")
+    .map((item) => item.changePercent)
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+  return indexChanges.length
+    ? indexChanges.reduce((sum, value) => sum + value, 0) / indexChanges.length
+    : null;
+}
+
+function getBacktestEvidence(
+  analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>,
+): BacktestEvidence | null {
+  return (
+    analysis.matched
+      .filter(
+        (combination) =>
+          combination.direction === analysis.direction &&
+          combination.testExpectedValue !== null &&
+          combination.testExpectedValue > 0 &&
+          combination.testWinRate !== null &&
+          combination.testWinRate >= 0.55 &&
+          combination.testProfitFactor !== null &&
+          combination.testProfitFactor > 1,
+      )
+      .sort(
+        (left, right) =>
+          (right.testExpectedValue ?? -Infinity) - (left.testExpectedValue ?? -Infinity),
+      )[0] ?? null
+  );
+}
+
+function scoreBlocks(
+  row: TopRow,
+  analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>,
+  context: SignalContext,
+  evidence: Combination | ProfessionalPattern,
+  backtest: BacktestEvidence | null,
+): ScoreBlocks {
+  const bullish = analysis.direction === "BUY";
+  const trend =
+    row.ema20 !== null && row.ema50 !== null && row.ema200 !== null
+      ? clampScore(
+          50 +
+            (bullish
+              ? (row.ema20 > row.ema50 ? 20 : -20) +
+                (row.ema50 > row.ema200 ? 20 : -20)
+              : (row.ema20 < row.ema50 ? 20 : -20) +
+                (row.ema50 < row.ema200 ? 20 : -20)) +
+            (row.adx !== null ? Math.min(20, Math.max(0, row.adx - 20)) : 0),
+        )
+      : null;
+  const momentumValues = [
+    row.macdHist !== null ? (bullish ? Math.sign(row.macdHist) : -Math.sign(row.macdHist)) : null,
+    row.acceleration !== null
+      ? (bullish ? Math.sign(row.acceleration) : -Math.sign(row.acceleration))
+      : null,
+    row.priceChange5 !== null
+      ? (bullish ? Math.sign(row.priceChange5) : -Math.sign(row.priceChange5))
+      : null,
+  ].filter((value): value is number => value !== null);
+  const momentum =
+    momentumValues.length
+      ? clampScore(50 + (momentumValues.reduce((sum, value) => sum + value, 0) / momentumValues.length) * 50)
+      : null;
+  const volume =
+    row.relativeVolume !== null
+      ? clampScore(50 + Math.max(-1, Math.min(1, row.relativeVolume - 1)) * 50)
+      : null;
+  const patternValues = analysis.matchedPatterns
+    .filter((pattern) => pattern.direction === analysis.direction)
+    .map((pattern) => {
+      const winRate = pattern.successRate ?? 0;
+      const testWinRate = pattern.testWinRate ?? winRate;
+      return (winRate + testWinRate) * 50;
+    });
+  const pattern = patternValues.length
+    ? clampScore(patternValues.reduce((sum, value) => sum + value, 0) / patternValues.length)
+    : null;
+  const breakout =
+    row.bbUpper !== null && row.bbLower !== null && row.bbUpper !== row.bbLower
+      ? clampScore(
+          bullish
+            ? ((row.close - row.bbLower) / (row.bbUpper - row.bbLower)) * 100
+            : ((row.bbUpper - row.close) / (row.bbUpper - row.bbLower)) * 100,
+        )
+      : null;
+  const smcNames = analysis.matchedPatterns.filter((pattern) =>
+    /BOS|CHOCH|Liquidity|Order Block|Breaker|Mitigation|Fair Value|Imbalance|Premium|Discount/i.test(
+      pattern.patternType,
+    ),
+  );
+  const smc = smcNames.length
+    ? clampScore(
+        smcNames.reduce(
+          (sum, pattern) => sum + (pattern.successRate ?? 0.5) * 100,
+          0,
+        ) / smcNames.length,
+      )
+    : null;
+  const distanceToSupport =
+    analysis.marketStructure.support !== null
+      ? Math.abs(row.close - analysis.marketStructure.support) / row.close
+      : null;
+  const distanceToResistance =
+    analysis.marketStructure.resistance !== null
+      ? Math.abs(row.close - analysis.marketStructure.resistance) / row.close
+      : null;
+  const structure =
+    analysis.marketStructure.support !== null || analysis.marketStructure.resistance !== null
+      ? clampScore(
+          50 +
+            (bullish
+              ? (distanceToSupport !== null && distanceToSupport < 0.02 ? 25 : 0)
+              : (distanceToResistance !== null && distanceToResistance < 0.02 ? 25 : 0)) +
+            Math.max(
+              analysis.marketStructure.supportStrength ?? 0,
+              analysis.marketStructure.resistanceStrength ?? 0,
+            ),
+        )
+      : null;
+  const correlation =
+    analysis.marketStructure.correlation !== null
+      ? directionAgreement(analysis.direction, analysis.marketStructure.correlation)
+      : null;
+  const expectancy =
+    "expectancy" in evidence ? evidence.expectancy : evidence.expectedValue;
+  const research = clampScore(
+    (evidence.successRate ?? 0) * 55 +
+      Math.min(35, (evidence.profitFactor ?? 0) * 15) +
+      Math.max(0, Math.min(10, (expectancy ?? 0) * 10)),
+  );
+  const backtestScore = backtest
+    ? clampScore(
+        (backtest.testWinRate ?? 0) * 55 +
+          Math.min(30, (backtest.testProfitFactor ?? 0) * 15) +
+          Math.max(0, Math.min(15, (backtest.testExpectedValue ?? 0) * 10)),
+      )
+    : null;
+  const risk =
+    row.atr !== null && row.close > 0
+      ? clampScore(100 - Math.min(100, (row.atr / row.close) * 100 * 20))
+      : null;
+  const pressure = macroPressure(context.macro);
+  const marketContext =
+    pressure !== null
+      ? clampScore(50 + (bullish ? pressure : -pressure) * 20)
+      : null;
+  return {
+    trend,
+    momentum,
+    volume,
+    pattern,
+    breakout,
+    smc,
+    structure,
+    correlation,
+    research,
+    backtest: backtestScore,
+    risk,
+    marketContext,
+  };
+}
+
+function weightedScore(blocks: ScoreBlocks) {
+  const entries = Object.entries(AI_SCORE_WEIGHTS) as [
+    keyof typeof AI_SCORE_WEIGHTS,
+    number,
+  ][];
+  let weighted = 0;
+  let totalWeight = 0;
+  for (const [key, weight] of entries) {
+    const value = blocks[key];
+    if (value === null || !Number.isFinite(value)) continue;
+    weighted += value * weight;
+    totalWeight += weight;
+  }
+  return totalWeight ? Math.round(weighted / totalWeight) : 0;
+}
 
 function evidenceScore(evidence: Combination | ProfessionalPattern) {
   const winRate = evidence.successRate ?? 0;
@@ -1248,63 +1559,6 @@ function topConfirmations(
   ];
 }
 
-function topRating(
-  row: TopRow,
-  analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>,
-  evidence: Combination | ProfessionalPattern,
-) {
-  const winRate = evidence.successRate ?? 0;
-  const profitFactor = evidence.profitFactor ?? 0;
-  const expectancy =
-    "expectancy" in evidence
-      ? evidence.expectancy ?? 0
-      : evidence.expectedValue ?? 0;
-  const testWinRate =
-    "testWinRate" in evidence ? evidence.testWinRate ?? winRate : winRate;
-  const confirmationCount =
-    analysis.matched.length +
-    analysis.matchedPatterns.length +
-    (analysis.marketStructure.support !== null ? 1 : 0) +
-    (analysis.marketStructure.resistance !== null ? 1 : 0);
-  const trendPoints =
-    row.ema20 !== null &&
-    row.ema50 !== null &&
-    row.ema200 !== null &&
-    ((analysis.direction === "BUY" &&
-      row.ema20 > row.ema50 &&
-      row.ema50 > row.ema200) ||
-      (analysis.direction === "SELL" &&
-        row.ema20 < row.ema50 &&
-        row.ema50 < row.ema200))
-      ? 8
-      : 0;
-  const volumePoints =
-    row.relativeVolume !== null ? Math.min(5, Math.max(0, row.relativeVolume - 1) * 5) : 0;
-  const correlationPoints =
-    analysis.marketStructure.correlation !== null &&
-    ((analysis.direction === "BUY" && analysis.marketStructure.correlation > 0) ||
-      (analysis.direction === "SELL" && analysis.marketStructure.correlation < 0))
-      ? 4
-      : 0;
-  return Math.round(
-    Math.min(
-      100,
-      Math.max(
-        0,
-        analysis.confidence * 0.25 +
-          Math.min(100, winRate * 100) * 0.2 +
-          Math.min(100, testWinRate * 100) * 0.15 +
-          Math.min(10, profitFactor) * 1.5 +
-          Math.max(0, Math.min(15, expectancy * 4)) +
-          Math.min(15, confirmationCount * 1.5) +
-          trendPoints +
-          volumePoints +
-          correlationPoints,
-      ),
-    ),
-  );
-}
-
 async function getTopAnalysisStats() {
   const result = await db.execute(sql`
     SELECT
@@ -1312,9 +1566,11 @@ async function getTopAnalysisStats() {
       (SELECT COUNT(*)::bigint FROM candles WHERE timeframe = ${TIMEFRAME}) AS candles,
       (SELECT COUNT(*)::bigint FROM features) AS features,
       (SELECT COUNT(*)::bigint FROM detected_patterns) AS detected_patterns,
-      (SELECT COUNT(*)::bigint FROM feature_combinations WHERE is_active = true AND statistical_significance = true) AS combinations,
+      (SELECT COUNT(*)::bigint FROM feature_combinations WHERE is_active = true AND name LIKE 'auto-engine:%') AS combinations_checked,
+      (SELECT COUNT(*)::bigint FROM feature_combinations WHERE is_active = true AND statistical_significance = true) AS combinations_significant,
       (SELECT COUNT(*)::bigint FROM market_levels WHERE timeframe = ${TIMEFRAME}) AS levels,
-      (SELECT COUNT(*)::bigint FROM asset_correlations WHERE timeframe = ${TIMEFRAME}) AS correlations
+      (SELECT COUNT(*)::bigint FROM asset_correlations WHERE timeframe = ${TIMEFRAME}) AS correlations,
+      (SELECT COUNT(*)::bigint FROM pattern_statistics WHERE is_significant = true) AS patterns_confirmed
   `);
   return result.rows[0] as Record<string, number | string | null>;
 }
@@ -1675,6 +1931,7 @@ async function marketText() {
 
 async function topText() {
   const startedAt = Date.now();
+  cachedSignalContext = null;
   const rows = await getTopRows();
   const context = await getSignalContext(
     rows
@@ -1688,22 +1945,92 @@ async function topText() {
     })),
   );
   const candidates: TopCandidate[] = [];
+  let rejected = 0;
+  let matchedLaws = 0;
   for (const item of analyses) {
-    if (item.analysis.direction === "HOLD") continue;
+    if (item.analysis.direction === "HOLD") {
+      rejected += 1;
+      continue;
+    }
     const evidence = topEvidence(item.analysis);
-    if (!evidence) continue;
+    if (!evidence) {
+      rejected += 1;
+      continue;
+    }
     const occurrences = evidence.occurrences ?? 0;
     const winRate = evidence.successRate ?? 0;
     const profitFactor = evidence.profitFactor ?? 0;
-    if (occurrences < 30 || winRate < 0.55 || profitFactor <= 1.2) continue;
+    const testWinRate =
+      "testWinRate" in evidence ? evidence.testWinRate : null;
+    const testExpectancy =
+      "testExpectancy" in evidence
+        ? evidence.testExpectancy
+        : "testExpectedValue" in evidence
+          ? evidence.testExpectedValue
+          : null;
+    const testProfitFactor =
+      "testProfitFactor" in evidence ? evidence.testProfitFactor : null;
+    if (
+      occurrences < 30 ||
+      winRate < 0.55 ||
+      profitFactor <= 1.2 ||
+      (testWinRate !== null && testWinRate < 0.55) ||
+      (testExpectancy !== null && testExpectancy <= 0) ||
+      (testProfitFactor !== null && testProfitFactor <= 1)
+    ) {
+      rejected += 1;
+      continue;
+    }
     const confirmations = topConfirmations(item.row, item.analysis);
+    const independentConfirmations = confirmations.filter(
+      (reason) =>
+        !reason.includes("исторических комбинаций") &&
+        !reason.includes("подтверждённых паттернов"),
+    );
+    if (!independentConfirmations.length) {
+      rejected += 1;
+      continue;
+    }
+    const backtest = getBacktestEvidence(item.analysis);
+    const blocks = scoreBlocks(
+      item.row,
+      item.analysis,
+      context,
+      evidence,
+      backtest,
+    );
+    const rating = weightedScore(blocks);
+    if (rating < 70) {
+      rejected += 1;
+      continue;
+    }
+    const matchedPatterns = item.analysis.matchedPatterns
+      .filter((pattern) => pattern.direction === item.analysis.direction)
+      .map(
+        (pattern) =>
+          `${pattern.patternType} (${formatNumber((pattern.successRate ?? 0) * 100, 1)}% WR)`,
+      );
+    const matchedFactors = item.analysis.matched
+      .filter((combination) => combination.direction === item.analysis.direction)
+      .flatMap((combination) =>
+        combination.conditions.map((condition) =>
+          String(condition.label ?? condition.key ?? "фактор"),
+        ),
+      )
+      .filter((factor, index, factors) => factors.indexOf(factor) === index);
+    matchedLaws +=
+      item.analysis.matched.length + item.analysis.matchedPatterns.length;
     candidates.push({
       ...item,
       evidence,
       confirmations,
       matchedFactorCount:
         item.analysis.matched.length + item.analysis.matchedPatterns.length,
-      rating: topRating(item.row, item.analysis, evidence),
+      rating,
+      scoreBlocks: blocks,
+      matchedPatterns,
+      matchedFactors,
+      backtest,
     });
   }
   const ranked = candidates
@@ -1722,7 +2049,8 @@ async function topText() {
       "• минимум 30 исторических наблюдений",
       "• Win Rate не ниже 55%",
       "• Profit Factor выше 1,2",
-      "• статистическая значимость и подтверждённый TP/SL",
+      "• положительные Test и Expectancy",
+      "• AI Score не ниже 70",
       "",
       "После загрузки свежих свечей запустите «🔄 Обновить исследование».",
     ].join("\n");
@@ -1733,6 +2061,14 @@ async function topText() {
     value === null || value === undefined
       ? "—"
       : Number(value).toLocaleString("ru-RU");
+  const macroSummary = context.macro.length
+    ? context.macro
+        .map(
+          (item) =>
+            `${item.code} ${item.changePercent === null ? "—" : `${item.changePercent > 0 ? "+" : ""}${formatNumber(item.changePercent, 2)}%`}`,
+        )
+        .join(" · ")
+    : "нет данных";
   const blocks = ranked.map((candidate, index) => {
     const { row, analysis, evidence } = candidate;
     const entry = row.close;
@@ -1752,6 +2088,26 @@ async function topText() {
       "qValue" in evidence ? evidence.qValue : null;
     const evidenceConfidenceHigh =
       "confidenceHigh" in evidence ? evidence.confidenceHigh : null;
+    const evidenceSharpe =
+      "sharpeRatio" in evidence
+        ? evidence.sharpeRatio
+        : candidate.backtest?.sharpeRatio ?? null;
+    const scoreLines = [
+      { name: "Trend", value: candidate.scoreBlocks.trend },
+      { name: "Momentum", value: candidate.scoreBlocks.momentum },
+      { name: "Volume", value: candidate.scoreBlocks.volume },
+      { name: "Pattern", value: candidate.scoreBlocks.pattern },
+      { name: "Breakout", value: candidate.scoreBlocks.breakout },
+      { name: "SMC", value: candidate.scoreBlocks.smc },
+      { name: "Support/Resistance", value: candidate.scoreBlocks.structure },
+      { name: "Correlation", value: candidate.scoreBlocks.correlation },
+      { name: "Research", value: candidate.scoreBlocks.research },
+      { name: "Backtest", value: candidate.scoreBlocks.backtest },
+      { name: "Risk", value: candidate.scoreBlocks.risk },
+      { name: "Market Context", value: candidate.scoreBlocks.marketContext },
+    ]
+      .map(({ name, value }) => `• ${name}: ${formatNumber(value, 1)}/100`)
+      .join("\n");
     const source =
       "patternType" in evidence
         ? `Паттерн: ${evidence.patternType}`
@@ -1760,12 +2116,15 @@ async function topText() {
             .join(" + ")}`;
     return [
       `${index + 1}. 📈 ${row.ticker} — ${directionLabel(analysis.direction)}`,
-      `Общий рейтинг: ${candidate.rating}/100`,
+      `AI Score: ${candidate.rating}/100`,
       `Уверенность: ${analysis.confidence}%`,
       `Вход: ${formatNumber(entry)}`,
       `Стоп: ${formatNumber(analysis.stop)} · Тейк: ${formatNumber(analysis.target)}`,
       `Risk/Reward: 1 : ${formatNumber(riskReward, 2)}`,
       `Горизонт: ${analysis.horizonMinutes} минут`,
+      "",
+      "Блоки AI Score:",
+      scoreLines,
       "",
       "Историческая статистика:",
       `• ${source}`,
@@ -1777,8 +2136,22 @@ async function topText() {
       )}%`,
       `• Profit Factor: ${formatNumber(evidence.profitFactor)}`,
       `• Expectancy: ${formatNumber(evidenceExpectancy, 4)}%`,
+      `• Train: ${formatNumber(
+        "trainWinRate" in evidence && evidence.trainWinRate !== null
+          ? evidence.trainWinRate * 100
+          : null,
+        2,
+      )}% WR / ${formatNumber(
+        "trainExpectancy" in evidence
+          ? evidence.trainExpectancy
+          : "trainExpectedValue" in evidence
+            ? evidence.trainExpectedValue
+            : null,
+        4,
+      )}%`,
       `• Средняя прибыль/убыток: ${formatNumber(evidence.averageProfit, 4)}% / ${formatNumber(evidence.averageLoss, 4)}%`,
       `• Просадка: ${formatNumber(evidence.maxDrawdown, 4)}%`,
+      `• Sharpe: ${formatNumber(evidenceSharpe, 3)}`,
       `• Лучший TP/SL: ${formatNumber(evidence.bestTakeProfit)}% / ${formatNumber(evidence.bestStopLoss)}%`,
       `• p-value/q-value: ${formatNumber(evidencePValue, 6)} / ${formatNumber(evidenceQValue, 6)}`,
       `• Доверительный интервал: ${formatNumber(
@@ -1793,8 +2166,29 @@ async function topText() {
         2,
       )}%`,
       "",
-      `Подтверждений: ${candidate.matchedFactorCount}`,
-      ...candidate.confirmations.slice(0, 8).map((reason) => `• ${reason}`),
+      `Подтверждений: ${candidate.confirmations.filter(
+        (reason) =>
+          !reason.includes("исторических комбинаций") &&
+          !reason.includes("подтверждённых паттернов"),
+      ).length}`,
+      `Совпавших паттернов: ${candidate.matchedPatterns.length}`,
+      candidate.matchedPatterns.length
+        ? `Паттерны: ${candidate.matchedPatterns.join(", ")}`
+        : null,
+      `Совпавших факторов: ${candidate.matchedFactors.length}`,
+      candidate.matchedFactors.length
+        ? `Факторы: ${candidate.matchedFactors.join(", ")}`
+        : null,
+      "Подтверждения индикаторов:",
+      ...candidate.confirmations.slice(0, 10).map((reason) => `• ${reason}`),
+      `Почему AI выбрал: ${candidate.confirmations
+        .filter(
+          (reason) =>
+            !reason.includes("исторических комбинаций") &&
+            !reason.includes("подтверждённых паттернов"),
+        )
+        .slice(0, 3)
+        .join("; ") || "есть подтверждённая историческая закономерность и положительный тест"}`,
       analysis.marketStructure.support !== null
         ? `• Поддержка: ${formatNumber(analysis.marketStructure.support)} (сила ${formatNumber(analysis.marketStructure.supportStrength)})`
         : null,
@@ -1813,11 +2207,18 @@ async function topText() {
     "📊 Статистика работы AI:",
     `• Акций проанализировано: ${formatCount(stats.tickers)}`,
     `• Свечей: ${formatCount(stats.candles)}`,
-    `• Признаков: ${formatCount(stats.features)}`,
-    `• Найденных паттернов: ${formatCount(stats.detected_patterns)}`,
-    `• Статистически значимых комбинаций: ${formatCount(stats.combinations)}`,
+    `• Признаков просмотрено: ${formatCount(stats.features)}`,
+    `• Паттернов найдено: ${formatCount(stats.detected_patterns)}`,
+    `• Паттернов подтверждено: ${formatCount(stats.patterns_confirmed)}`,
+    `• Комбинаций факторов проверено: ${formatCount(stats.combinations_checked)}`,
+    `• Статистически значимых комбинаций: ${formatCount(stats.combinations_significant)}`,
+    `• Закономерностей совпало: ${formatCount(matchedLaws)}`,
+    `• Сигналов отброшено: ${formatCount(rejected)}`,
     `• Уровней: ${formatCount(stats.levels)}`,
     `• Корреляций: ${formatCount(stats.correlations)}`,
+    `• Рыночный контекст: ${macroSummary}`,
+    `• Версия ядра: ${RESEARCH_ENGINE_VERSION}`,
+    `• Веса Score: Trend ${AI_SCORE_WEIGHTS.trend * 100}% · Momentum ${AI_SCORE_WEIGHTS.momentum * 100}% · Pattern ${AI_SCORE_WEIGHTS.pattern * 100}% · Research ${AI_SCORE_WEIGHTS.research * 100}% · Backtest ${AI_SCORE_WEIGHTS.backtest * 100}%`,
     `• Время анализа: ${formatNumber((Date.now() - startedAt) / 1000, 1)} сек.`,
     "",
     "Для детального сигнала: /signal ТИКЕР",
