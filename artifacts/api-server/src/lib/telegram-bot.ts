@@ -957,6 +957,78 @@ function isRefreshRequest(text: string) {
   );
 }
 
+async function researchResultsText() {
+  const rows = await db
+    .select({
+      name: featureCombinations.name,
+      conditions: featureCombinations.conditions,
+      direction: featureCombinations.direction,
+      occurrences: featureCombinations.occurrences,
+      successRate: featureCombinations.successRate,
+      profitFactor: featureCombinations.profitFactor,
+      expectedValue: featureCombinations.expectedValue,
+      averageProfit: featureCombinations.averageProfit,
+      maxDrawdown: featureCombinations.maxDrawdown,
+      bestTakeProfit: featureCombinations.bestTakeProfit,
+      bestStopLoss: featureCombinations.bestStopLoss,
+      bestHoldingMinutes: featureCombinations.bestHoldingMinutes,
+      testWinRate: featureCombinations.testWinRate,
+      testExpectedValue: featureCombinations.testExpectedValue,
+      testProfitFactor: featureCombinations.testProfitFactor,
+      pValue: featureCombinations.pValue,
+    })
+    .from(featureCombinations)
+    .where(
+      and(
+        eq(featureCombinations.isActive, true),
+        eq(featureCombinations.statisticalSignificance, true),
+        sql`${featureCombinations.name} LIKE 'auto-engine:%'`,
+      ),
+    )
+    .orderBy(
+      desc(featureCombinations.testExpectedValue),
+      desc(featureCombinations.expectedValue),
+    )
+    .limit(5);
+
+  if (!rows.length) {
+    return "Новых статистически значимых закономерностей пока не найдено.";
+  }
+
+  const blocks = rows.map((row, index) => {
+    const conditions = row.conditions
+      .map((condition) => String(condition.label ?? condition.key ?? "фактор"))
+      .join(" + ");
+    const title =
+      conditions ||
+      row.name.replace(/^auto-engine:/, "").replace(/:SELL:|:BUY:/, " ");
+    return [
+      `${index + 1}. ${title}`,
+      `Направление: ${row.direction ?? "—"}`,
+      `Появлений: ${row.occurrences}`,
+      `Win rate: ${formatNumber((row.successRate ?? 0) * 100, 2)}%`,
+      `Profit factor: ${formatNumber(row.profitFactor)}`,
+      `Expectancy: ${formatNumber(row.expectedValue, 4)}%`,
+      `Средняя прибыль: ${formatNumber(row.averageProfit, 4)}%`,
+      `Максимальная просадка: ${formatNumber(row.maxDrawdown, 4)}%`,
+      `Лучший TP: ${formatNumber(row.bestTakeProfit)}%`,
+      `Лучший SL: ${formatNumber(row.bestStopLoss)}%`,
+      `Срок удержания: ${row.bestHoldingMinutes ?? "—"} минут`,
+      `Test win rate: ${formatNumber((row.testWinRate ?? 0) * 100, 2)}%`,
+      `Test expectancy: ${formatNumber(row.testExpectedValue, 4)}%`,
+      `Test profit factor: ${formatNumber(row.testProfitFactor)}`,
+      `p-value: ${formatNumber(row.pValue, 6)}`,
+    ].join("\n");
+  });
+
+  return [
+    "📊 Лучшие найденные закономерности",
+    "",
+    ...blocks.flatMap((block) => [block, ""]),
+    "Это статистические результаты исследования, а не финансовая рекомендация.",
+  ].join("\n");
+}
+
 function startResearchRefresh() {
   if (researchRefreshRunning) {
     return {
@@ -988,12 +1060,16 @@ function startResearchRefresh() {
   const completion = once(child, "exit").then(([code, signal]) => {
     researchRefreshRunning = false;
     if (code === 0) {
-      return [
+      return researchResultsText().then((results) =>
+        [
         "✅ Полное обновление завершено.",
         "",
         "Обновлены свечи MOEX, признаки, исследовательское ядро, уровни и корреляции.",
         "Новые результаты уже используются командами /signal и /top.",
-      ].join("\n");
+        "",
+        results,
+      ].join("\n"),
+      );
     }
     return [
       "❌ Полное обновление завершилось с ошибкой.",
