@@ -1,2 +1,3 @@
 - [MOEX importer](moex-import.md) — MOEX ISS candles use a supported 10-minute interval here; filter ETF instruments out of the share universe.
 - [Research database alignment](research-database-alignment.md) — existing pattern occurrence records use `timestamp`; preserve live column names when extending the schema.
+- [Telegram bot performance](telegram-performance.md) — use indexed latest-row lookups and map reply-keyboard labels to slash-command handlers.

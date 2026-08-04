@@ -7,6 +7,7 @@ import {
   assetCorrelations,
   marketContext,
   marketLevels,
+  moexTickers,
   patterns,
   pool,
   signalsHistory,
@@ -85,6 +86,19 @@ type MarketStructure = {
   correlation: number | null;
   correlationSamples: number | null;
 };
+type SignalContext = {
+  combinations: Combination[];
+  volatilityMedian: number | null;
+  patternsByTicker: Map<string, CandlePattern[]>;
+  levelsByTicker: Map<string, { levelType: string; price: number }[]>;
+  correlationsByTicker: Map<
+    string,
+    { correlation: number | null; sampleCount: number | null }
+  >;
+};
+
+let cachedSignalContext: { value: SignalContext; expiresAt: number } | null =
+  null;
 
 function formatNumber(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined || !Number.isFinite(value)) {
@@ -224,8 +238,8 @@ async function getLatestMarket(): Promise<LatestMarket | null> {
 
 async function getTopRows() {
   const result = await db.execute(sql`
-    SELECT DISTINCT ON (f.ticker)
-      f.ticker,
+    SELECT
+      t.secid AS ticker,
       f.timestamp,
       c.close,
       f.ema_20 AS "ema20",
@@ -241,13 +255,34 @@ async function getTopRows() {
       f.is_engulfing AS "isEngulfing",
       f.is_inside_bar AS "isInsideBar",
       f.is_outside_bar AS "isOutsideBar"
-    FROM features f
+    FROM moex_tickers t
+    CROSS JOIN LATERAL (
+      SELECT
+        f.timestamp,
+        f.candle_id,
+        f.ema_20,
+        f.ema_50,
+        f.rsi,
+        f.macd_hist,
+        f.relative_volume,
+        f.atr,
+        f.bb_middle,
+        f.historical_volatility,
+        f.is_doji,
+        f.is_hammer,
+        f.is_engulfing,
+        f.is_inside_bar,
+        f.is_outside_bar
+      FROM features f
+      WHERE f.ticker = t.secid
+      ORDER BY f.timestamp DESC
+      LIMIT 1
+    ) f
     INNER JOIN candles c
-      ON c.ticker = f.ticker
+      ON c.id = f.candle_id
       AND c.timeframe = ${TIMEFRAME}
-      AND c.timestamp = f.timestamp
-    WHERE f.ticker <> 'IMOEX'
-    ORDER BY f.ticker, f.timestamp DESC
+    WHERE t.is_active = true
+      AND t.secid <> 'IMOEX'
   `);
   return result.rows as unknown as TopRow[];
 }
@@ -310,48 +345,41 @@ function matchesCombination(
   });
 }
 
-async function getVolatilityMedian() {
-  const result = await db.execute(
-    sql`SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY historical_volatility) AS median
-        FROM features
-        WHERE historical_volatility IS NOT NULL`,
-  );
-  const value = (result.rows[0] as { median?: number | string | null } | undefined)?.median;
-  return value === null || value === undefined ? null : Number(value);
+function median(values: number[]) {
+  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-async function getMarketStructure(
+async function getVolatilityMedian() {
+  const result = await db.execute(
+    sql`SELECT historical_volatility
+        FROM features
+        WHERE ticker = 'IMOEX'
+        ORDER BY timestamp DESC
+        LIMIT 1`,
+  );
+  const values = result.rows
+    .map((row) =>
+      Number(
+        (row as { historical_volatility?: number | string | null })
+          .historical_volatility,
+      ),
+    )
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return null;
+  return values[0];
+}
+
+function marketStructureFromContext(
   ticker: string,
   currentPrice: number,
-): Promise<MarketStructure> {
-  const [levels, correlations] = await Promise.all([
-    db
-      .select({
-        levelType: marketLevels.levelType,
-        price: marketLevels.price,
-      })
-      .from(marketLevels)
-      .where(
-        and(
-          eq(marketLevels.ticker, ticker),
-          eq(marketLevels.timeframe, TIMEFRAME),
-        ),
-      ),
-    db
-      .select({
-        correlation: assetCorrelations.correlation,
-        sampleCount: assetCorrelations.sampleCount,
-      })
-      .from(assetCorrelations)
-      .where(
-        and(
-          eq(assetCorrelations.assetTicker, ticker),
-          eq(assetCorrelations.benchmarkTicker, "IMOEX"),
-          eq(assetCorrelations.timeframe, TIMEFRAME),
-        ),
-      )
-      .limit(1),
-  ]);
+  context: SignalContext,
+): MarketStructure {
+  const levels = context.levelsByTicker.get(ticker) ?? [];
   const supports = levels
     .filter((level) => level.levelType === "support")
     .map((level) => level.price)
@@ -360,13 +388,98 @@ async function getMarketStructure(
     .filter((level) => level.levelType === "resistance")
     .map((level) => level.price)
     .filter((price) => Number.isFinite(price) && price >= currentPrice);
-  const correlation = correlations[0];
+  const correlation = context.correlationsByTicker.get(ticker);
   return {
     support: supports.length ? Math.max(...supports) : null,
     resistance: resistances.length ? Math.min(...resistances) : null,
     correlation: correlation?.correlation ?? null,
     correlationSamples: correlation?.sampleCount ?? null,
   };
+}
+
+async function getSignalContext(volatilityValues: number[] = []): Promise<SignalContext> {
+  if (cachedSignalContext && cachedSignalContext.expiresAt > Date.now()) {
+    return cachedSignalContext.value;
+  }
+  const [combinations, patternRows, levelRows, correlationRows] =
+    await Promise.all([
+      getValidatedCombinations(),
+      db
+        .select({
+          ticker: patterns.ticker,
+          id: patterns.id,
+          name: patterns.name,
+          direction: patterns.direction,
+          successRate: patterns.successRate,
+          profitFactor: patterns.profitFactor,
+          occurrences: patterns.occurrences,
+          averageProfit: patterns.averageProfit,
+        })
+        .from(patterns)
+        .where(eq(patterns.isActive, true))
+        .orderBy(desc(patterns.successRate)),
+      db
+        .select({
+          ticker: marketLevels.ticker,
+          levelType: marketLevels.levelType,
+          price: marketLevels.price,
+        })
+        .from(marketLevels)
+        .where(eq(marketLevels.timeframe, TIMEFRAME)),
+      db
+        .select({
+          ticker: assetCorrelations.assetTicker,
+          correlation: assetCorrelations.correlation,
+          sampleCount: assetCorrelations.sampleCount,
+        })
+        .from(assetCorrelations)
+        .where(
+          and(
+            eq(assetCorrelations.benchmarkTicker, "IMOEX"),
+            eq(assetCorrelations.timeframe, TIMEFRAME),
+          ),
+        ),
+    ]);
+  const volatilityMedian =
+    median(volatilityValues) ?? (await getVolatilityMedian());
+
+  const patternsByTicker = new Map<string, CandlePattern[]>();
+  for (const pattern of patternRows) {
+    const current = patternsByTicker.get(pattern.ticker) ?? [];
+    current.push(pattern);
+    patternsByTicker.set(pattern.ticker, current);
+  }
+  const levelsByTicker = new Map<
+    string,
+    { levelType: string; price: number }[]
+  >();
+  for (const level of levelRows) {
+    const current = levelsByTicker.get(level.ticker) ?? [];
+    current.push({ levelType: level.levelType, price: level.price });
+    levelsByTicker.set(level.ticker, current);
+  }
+  const correlationsByTicker = new Map<
+    string,
+    { correlation: number | null; sampleCount: number | null }
+  >();
+  for (const correlation of correlationRows) {
+    correlationsByTicker.set(correlation.ticker, {
+      correlation: correlation.correlation,
+      sampleCount: correlation.sampleCount,
+    });
+  }
+  const context = {
+    combinations,
+    volatilityMedian,
+    patternsByTicker,
+    levelsByTicker,
+    correlationsByTicker,
+  };
+  cachedSignalContext = {
+    value: context,
+    expiresAt: Date.now() + 60_000,
+  };
+  return context;
 }
 
 async function getValidatedPatterns(ticker: string): Promise<CandlePattern[]> {
@@ -413,12 +526,32 @@ async function analyzeSignal(ticker: string, feature: LatestFeature): Promise<{
   matchedPatterns: CandlePattern[];
   marketStructure: MarketStructure;
 }> {
-  const [combinations, volatilityMedian, candlePatterns, marketStructure] = await Promise.all([
-    getValidatedCombinations(),
-    getVolatilityMedian(),
-    getValidatedPatterns(ticker),
-    getMarketStructure(ticker, feature.close),
-  ]);
+  return analyzeSignalWithContext(ticker, feature, await getSignalContext());
+}
+
+async function analyzeSignalWithContext(
+  ticker: string,
+  feature: LatestFeature,
+  context: SignalContext,
+): Promise<{
+  direction: SignalDirection;
+  confidence: number;
+  reasons: string[];
+  stop: number;
+  target: number;
+  horizonMinutes: number;
+  matched: Combination[];
+  matchedPatterns: CandlePattern[];
+  marketStructure: MarketStructure;
+}> {
+  const combinations = context.combinations;
+  const volatilityMedian = context.volatilityMedian;
+  const candlePatterns = context.patternsByTicker.get(ticker) ?? [];
+  const marketStructure = marketStructureFromContext(
+    ticker,
+    feature.close,
+    context,
+  );
   const matched = combinations.filter((combination) =>
     matchesCombination(feature, combination, volatilityMedian),
   );
@@ -453,7 +586,7 @@ async function analyzeSignal(ticker: string, feature: LatestFeature): Promise<{
     .reduce((sum, pattern) => sum + Math.max((pattern.successRate ?? 0.5) - 0.5, 0), 0);
   const totalBuyEvidence = buyEvidence + buyPatternEvidence;
   const totalSellEvidence = sellEvidence + sellPatternEvidence;
-  const direction =
+  const direction: SignalDirection =
     totalBuyEvidence === totalSellEvidence
       ? "HOLD"
       : totalBuyEvidence > totalSellEvidence
@@ -606,8 +739,16 @@ async function marketText() {
 
 async function topText() {
   const rows = await getTopRows();
+  const context = await getSignalContext(
+    rows
+      .map((row) => row.historicalVolatility)
+      .filter((value): value is number => value !== null),
+  );
   const analyses = await Promise.all(
-    rows.map(async (row) => ({ row, analysis: await analyzeSignal(row.ticker, row) })),
+    rows.map(async (row) => ({
+      row,
+      analysis: await analyzeSignalWithContext(row.ticker, row, context),
+    })),
   );
   const ranked = analyses
     .filter(
@@ -635,16 +776,27 @@ async function topText() {
 }
 
 async function handleMessage(chatId: number, text: string) {
-  const [command, argument] = text.trim().split(/\s+/, 2);
+  const trimmedText = text.trim();
+  const [command, argument] = trimmedText.split(/\s+/, 2);
   const normalizedCommand = command.toLowerCase().split("@", 1)[0];
+  const normalizedText = trimmedText.toLocaleLowerCase("ru-RU");
 
   if (normalizedCommand === "/start" || normalizedCommand === "/help") {
+    return helpText();
+  }
+  if (normalizedText === "помощь") {
     return helpText();
   }
   if (normalizedCommand === "/market") {
     return marketText();
   }
+  if (normalizedText === "цены" || normalizedText === "котировка") {
+    return marketText();
+  }
   if (normalizedCommand === "/top") {
+    return topText();
+  }
+  if (normalizedText === "акции" || normalizedText === "найденные") {
     return topText();
   }
   if (normalizedCommand === "/signal") {
@@ -654,7 +806,11 @@ async function handleMessage(chatId: number, text: string) {
   if (text.startsWith("/")) {
     return "Неизвестная команда. Используйте /help.";
   }
-  return undefined;
+  return "Не понял сообщение. Нажмите «Помощь» или используйте /help.";
+}
+
+async function sleep(milliseconds: number) {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function createTelegramClient(token: string) {
@@ -727,15 +883,38 @@ export function startTelegramBot() {
       logger.info({ username: me.username ?? "unknown" }, "Telegram bot connected");
 
       while (running) {
-        const updates = await client.getUpdates(offset, controller.signal);
-        for (const update of updates) {
-          offset = update.update_id + 1;
-          const message = update.message;
-          if (!message?.text) continue;
-          const response = await handleMessage(message.chat.id, message.text);
-          if (response) {
-            await client.sendMessage(message.chat.id, response);
+        try {
+          const updates = await client.getUpdates(offset, controller.signal);
+          if (updates.length > 0) {
+            logger.info(
+              { count: updates.length, firstUpdateId: updates[0]?.update_id },
+              "Telegram updates received",
+            );
           }
+          for (const update of updates) {
+            offset = update.update_id + 1;
+            const message = update.message;
+            if (!message?.text) continue;
+            const command = message.text.trim().split(/\s+/, 1)[0];
+            logger.info({ command }, "Telegram command received");
+            try {
+              const response = await handleMessage(message.chat.id, message.text);
+              if (response) {
+                await client.sendMessage(message.chat.id, response);
+                logger.info({ command }, "Telegram response sent");
+              }
+            } catch (error) {
+              logger.error({ err: error, command }, "Telegram command failed");
+              await client.sendMessage(
+                message.chat.id,
+                "Не удалось обработать команду. Попробуйте ещё раз через несколько секунд.",
+              );
+            }
+          }
+        } catch (error) {
+          if (!running) break;
+          logger.error({ err: error }, "Telegram polling error; retrying");
+          await sleep(3000);
         }
       }
     } catch (error) {
