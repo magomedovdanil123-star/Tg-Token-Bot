@@ -23,7 +23,7 @@ type CandleRow = {
 };
 
 const API_ROOT = "https://iss.moex.com/iss";
-// MOEX ISS supports 10-minute candles (not 15-minute candles) for this endpoint.
+// MOEX ISS provides the 10-minute source candles used by the importer.
 const TIMEFRAME = "10m";
 const INTERVAL = 10;
 const PAGE_SIZE = 500;
@@ -632,12 +632,20 @@ async function main() {
   if (arg("features-only", "false") === "true") {
     const featuresStart = integerArg("features-start", 0);
     const featuresLimit = integerArg("features-limit", 1000);
+    const requestedTicker = arg("ticker", "").trim().toUpperCase();
     const tickerRows = (
       await db
         .selectDistinct({ ticker: candles.ticker })
         .from(candles)
         .innerJoin(moexTickers, eq(moexTickers.secid, candles.ticker))
-        .where(eq(moexTickers.isActive, true))
+        .where(
+          requestedTicker
+            ? and(
+                eq(moexTickers.isActive, true),
+                eq(candles.ticker, requestedTicker),
+              )
+            : eq(moexTickers.isActive, true),
+        )
         .orderBy(asc(candles.ticker))
     ).slice(featuresStart, featuresStart + featuresLimit);
     let refreshed = 0;

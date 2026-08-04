@@ -53,7 +53,7 @@ Stores MOEX market candles, technical indicators, market context, and research r
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Для акций IMOEX использовать отдельные 10-минутные свечи; 30-минутный таймфрейм не создавать без нового запроса.
 
 ## Gotchas
 
