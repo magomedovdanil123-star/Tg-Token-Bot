@@ -18,6 +18,7 @@ import {
 } from "@workspace/db";
 import { logger } from "./logger";
 import { scanMarketAnalogues } from "./market-analog-scanner";
+import { scanIntraday, type IntradayCandidate } from "./intraday-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
@@ -27,6 +28,7 @@ const REFRESH_BUTTON = "🔄 Обновить исследование";
 const SIGNAL_PICKER_BUTTON = "🎯 Сигнал по тикеру";
 const ANALOG_BUTTON = "📊 Аналогичные рыночные ситуации";
 const ACCURACY_BUTTON = "📊 Точность сигналов";
+const INTRADAY_BUTTON = "⚡ Внутри дня";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
@@ -57,6 +59,7 @@ const TELEGRAM_MENU = {
     [SIGNAL_PICKER_BUTTON],
     ["🔥 Лучшие сигналы", "📋 Состав IMOEX"],
     [ANALOG_BUTTON],
+    [INTRADAY_BUTTON],
     [ACCURACY_BUTTON],
     ["📈 Состояние рынка", "❓ Помощь"],
   ],
@@ -2030,6 +2033,7 @@ function helpText() {
     "INVEST AI Research Engine",
     "",
     "Команды:",
+    "/intraday — внутридневной сканер IMOEX",
     "/signal SBER — сигнал по тикеру",
     "/imoex — состав индекса IMOEX",
     "/market — состояние IMOEX",
@@ -2041,6 +2045,83 @@ function helpText() {
     "Данные: исторические свечи MOEX и рассчитанные признаки.",
     `Для полного обновления нажмите «${REFRESH_BUTTON}».`,
   ].join("\n");
+}
+
+function isIntradayRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === INTRADAY_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "внутри дня" ||
+    normalizedText === "внутридневная торговля" ||
+    normalizedText === "/intraday"
+  );
+}
+
+function intradayCandidateText(candidate: IntradayCandidate, index: number) {
+  const isLong = candidate.direction === "BUY";
+  const marketEntry = isLong ? candidate.quote.offer : candidate.quote.bid;
+  if (marketEntry === null) return null;
+  const target = isLong
+    ? marketEntry * (1 + candidate.targetPercent / 100)
+    : marketEntry * (1 - candidate.targetPercent / 100);
+  const stop = isLong
+    ? marketEntry * (1 - candidate.stopPercent / 100)
+    : marketEntry * (1 + candidate.stopPercent / 100);
+  const netTargetPercent = candidate.targetPercent - PAPER_TRANSACTION_COST_PERCENT;
+  return [
+    `${index}. ${candidate.ticker} — ${isLong ? "LONG" : "SHORT"}`,
+    `Сила внутридневного сетапа: ${candidate.score}/100`,
+    `Текущая цена: ${formatNumber(candidate.quote.last)}`,
+    `Вход ${isLong ? "Ask" : "Bid"}: ${formatNumber(marketEntry)}`,
+    `Take profit: ${formatNumber(target)} (${isLong ? "+" : "-"}${formatNumber(candidate.targetPercent)}%)`,
+    `Stop loss: ${formatNumber(stop)} (${isLong ? "-" : "+"}${formatNumber(candidate.stopPercent)}%)`,
+    `Чистый потенциал после издержек: ${isLong ? "+" : "-"}${formatNumber(netTargetPercent)}%`,
+    `Спред: ${formatNumber(candidate.spreadPercent, 3)}%`,
+    candidate.currentChangePercent === null
+      ? "Изменение от последней свечи: —"
+      : `Изменение от последней свечи: ${candidate.currentChangePercent >= 0 ? "+" : ""}${formatNumber(candidate.currentChangePercent)}%`,
+    `Свеча индикаторов: ${formatDate(candidate.feature.timestamp)}`,
+    "Причины:",
+    ...candidate.reasons.map((reason) => `• ${reason}`),
+    "Стакан: не используется — публичный MOEX endpoint не отдал orderbook",
+    "Режим: PAPER TRADING — реальные сделки не совершаются",
+  ].join("\n");
+}
+
+async function intradayText() {
+  try {
+    const scan = await scanIntraday();
+    const blocks = scan.candidates
+      .map((candidate, index) => intradayCandidateText(candidate, index + 1))
+      .filter((block): block is string => Boolean(block));
+    const unavailablePreview = scan.unavailable.slice(0, 3);
+    return [
+      "⚡ ВНУТРИДНЕВНОЙ СКАНЕР IMOEX",
+      "",
+      `Проверено бумаг: ${scan.analyzed}`,
+      `Свежие индикаторы: ${scan.freshFeatures}`,
+      `Обновлено: ${formatDate(scan.generatedAt)}`,
+      "Фильтры: спред до 0,35% · оборот от 5 млн ₽ · данные не старше 30 минут",
+      "",
+      blocks.length ? blocks.flatMap((block) => [block, ""]) : ["Подходящих свежих сетапов сейчас нет.", ""],
+      unavailablePreview.length
+        ? `Не готовы к оценке: ${unavailablePreview.join("; ")}${scan.unavailable.length > unavailablePreview.length ? " и другие" : ""}`
+        : "Все активные бумаги прошли проверку свежести.",
+      "",
+      "Стакан и поток сделок пока не подтверждают сигнал: MOEX не отдал orderbook через публичный endpoint.",
+      "Следующий этап: 1m/5m-данные, Opening Range, пробой/ретест, VWAP-сценарии и бумажная проверка исполнения.",
+      "",
+      "Важно: это исследовательский paper-сигнал, не финансовая рекомендация.",
+    ].join("\n");
+  } catch (error) {
+    logger.error({ err: error }, "Intraday scan failed");
+    return [
+      "⚡ ВНУТРИДНЕВНОЙ СКАНЕР IMOEX",
+      "",
+      "Не удалось получить актуальные котировки MOEX.",
+      "Сигналы не формирую, чтобы не использовать старые данные.",
+    ].join("\n");
+  }
 }
 
 function isRefreshRequest(text: string) {
@@ -2693,6 +2774,9 @@ async function handleMessage(chatId: number, text: string) {
   if (normalizedCommand === "/market") {
     return marketText();
   }
+  if (isIntradayRequest(text)) {
+    return intradayText();
+  }
   if (normalizedText === "цены" || normalizedText === "котировка") {
     return marketText();
   }
@@ -2836,6 +2920,7 @@ export function startTelegramBot() {
           { command: "signal", description: "Сигнал по тикеру" },
           { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
+          { command: "intraday", description: "Внутридневной сканер IMOEX" },
           { command: "top", description: "Лучшие сигналы" },
           { command: "analogs", description: "Аналогичные рыночные ситуации" },
           { command: "accuracy", description: "Точность paper-сигналов" },
