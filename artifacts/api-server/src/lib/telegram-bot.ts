@@ -1029,7 +1029,7 @@ async function researchResultsText() {
   ].join("\n");
 }
 
-function startResearchRefresh() {
+function startResearchRefresh(notify: (text: string) => Promise<unknown>) {
   if (researchRefreshRunning) {
     return {
       started: false,
@@ -1042,7 +1042,15 @@ function startResearchRefresh() {
   researchRefreshRunning = true;
   const child = spawn(
     "pnpm",
-    ["--filter", "@workspace/scripts", "run", "research-refresh"],
+    [
+      "--filter",
+      "@workspace/scripts",
+      "run",
+      "research-refresh",
+      "--",
+      "--skip-import",
+      "--skip-context",
+    ],
     {
       cwd: process.cwd(),
       env: process.env,
@@ -1050,21 +1058,69 @@ function startResearchRefresh() {
     },
   );
 
+  const progressSent = new Set<string>();
+  const heartbeat = setInterval(() => {
+    void notify(
+      "⏳ Обновление ещё выполняется. Данные пересчитываются, процесс не завис.",
+    ).catch((error) => {
+      logger.warn({ err: error }, "Research refresh heartbeat notification failed");
+    });
+  }, 60_000);
+  const notifyOnce = (key: string, text: string) => {
+    if (progressSent.has(key)) return;
+    progressSent.add(key);
+    void notify(text).catch((error) => {
+      logger.warn({ err: error, key }, "Research refresh progress notification failed");
+    });
+  };
+
   child.stdout.on("data", (chunk: Buffer) => {
-    logger.info({ output: chunk.toString().trim() }, "Research refresh output");
+    const output = chunk.toString().trim();
+    logger.info({ output }, "Research refresh output");
+    if (output.includes("=== Исследовательское ядро комбинаций факторов")) {
+      notifyOnce(
+        "engine-start",
+        "🧠 Исследовательское ядро запущено: перебираю факторы и проверяю статистическую устойчивость.",
+      );
+    }
+    if (output.includes("Готово. Событий:")) {
+      notifyOnce(
+        "engine-done",
+        "✅ Исследовательское ядро завершило перебор комбинаций.",
+      );
+      void researchResultsText()
+        .then((results) =>
+          notify(
+            `📊 Предварительный отчёт по исследовательскому ядру:\n\n${results}`,
+          ),
+        )
+        .catch((error) => {
+          logger.warn({ err: error }, "Research refresh early report failed");
+        });
+    }
+    if (output.includes("=== Обновление свечных паттернов")) {
+      notifyOnce("patterns-start", "🕯 Обновляю свечные модели.");
+    }
+    if (output.includes("Свечные паттерны:")) {
+      notifyOnce("patterns-done", "✅ Свечные модели обновлены.");
+    }
+    if (output.includes("=== Обновление уровней и корреляций")) {
+      notifyOnce("levels-start", "📐 Обновляю уровни и корреляции.");
+    }
   });
   child.stderr.on("data", (chunk: Buffer) => {
     logger.warn({ output: chunk.toString().trim() }, "Research refresh error output");
   });
 
   const completion = once(child, "exit").then(([code, signal]) => {
+    clearInterval(heartbeat);
     researchRefreshRunning = false;
     if (code === 0) {
       return researchResultsText().then((results) =>
         [
-        "✅ Полное обновление завершено.",
+        "✅ Исследование обновлено.",
         "",
-        "Обновлены свечи MOEX, признаки, исследовательское ядро, уровни и корреляции.",
+        "Пересчитаны исследовательское ядро, свечные модели, уровни и корреляции на уже сохранённых свечах MOEX.",
         "Новые результаты уже используются командами /signal и /top.",
         "",
         results,
@@ -1363,7 +1419,9 @@ export function startTelegramBot() {
             logger.info({ command }, "Telegram command received");
             try {
               if (isRefreshRequest(message.text)) {
-                const refresh = startResearchRefresh();
+                const refresh = startResearchRefresh((progress) =>
+                  client.sendMessage(message.chat.id, progress),
+                );
                 await client.sendMessage(
                   message.chat.id,
                   refresh.started
