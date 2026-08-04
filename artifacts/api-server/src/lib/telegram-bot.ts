@@ -1249,7 +1249,7 @@ type TopCandidate = {
   row: TopRow;
   analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>;
   rating: number;
-  evidence: Combination | ProfessionalPattern;
+  evidence: Combination | ProfessionalPattern | null;
   confirmations: string[];
   matchedFactorCount: number;
   scoreBlocks: ScoreBlocks;
@@ -1321,7 +1321,7 @@ function scoreBlocks(
   row: TopRow,
   analysis: Awaited<ReturnType<typeof analyzeSignalWithContext>>,
   context: SignalContext,
-  evidence: Combination | ProfessionalPattern,
+  evidence: Combination | ProfessionalPattern | null,
   backtest: BacktestEvidence | null,
 ): ScoreBlocks {
   const bullish = analysis.direction === "BUY";
@@ -1410,13 +1410,18 @@ function scoreBlocks(
     analysis.marketStructure.correlation !== null
       ? directionAgreement(analysis.direction, analysis.marketStructure.correlation)
       : null;
-  const expectancy =
-    "expectancy" in evidence ? evidence.expectancy : evidence.expectedValue;
-  const research = clampScore(
-    (evidence.successRate ?? 0) * 55 +
-      Math.min(35, (evidence.profitFactor ?? 0) * 15) +
-      Math.max(0, Math.min(10, (expectancy ?? 0) * 10)),
-  );
+  const expectancy = evidence
+    ? "expectancy" in evidence
+      ? evidence.expectancy
+      : evidence.expectedValue
+    : null;
+  const research = evidence
+    ? clampScore(
+        (evidence.successRate ?? 0) * 55 +
+          Math.min(35, (evidence.profitFactor ?? 0) * 15) +
+          Math.max(0, Math.min(10, (expectancy ?? 0) * 10)),
+      )
+    : null;
   const backtestScore = backtest
     ? clampScore(
         (backtest.testWinRate ?? 0) * 55 +
@@ -1945,52 +1950,10 @@ async function topText() {
     })),
   );
   const candidates: TopCandidate[] = [];
-  let rejected = 0;
   let matchedLaws = 0;
   for (const item of analyses) {
-    if (item.analysis.direction === "HOLD") {
-      rejected += 1;
-      continue;
-    }
     const evidence = topEvidence(item.analysis);
-    if (!evidence) {
-      rejected += 1;
-      continue;
-    }
-    const occurrences = evidence.occurrences ?? 0;
-    const winRate = evidence.successRate ?? 0;
-    const profitFactor = evidence.profitFactor ?? 0;
-    const testWinRate =
-      "testWinRate" in evidence ? evidence.testWinRate : null;
-    const testExpectancy =
-      "testExpectancy" in evidence
-        ? evidence.testExpectancy
-        : "testExpectedValue" in evidence
-          ? evidence.testExpectedValue
-          : null;
-    const testProfitFactor =
-      "testProfitFactor" in evidence ? evidence.testProfitFactor : null;
-    if (
-      occurrences < 30 ||
-      winRate < 0.55 ||
-      profitFactor <= 1.2 ||
-      (testWinRate !== null && testWinRate < 0.55) ||
-      (testExpectancy !== null && testExpectancy <= 0) ||
-      (testProfitFactor !== null && testProfitFactor <= 1)
-    ) {
-      rejected += 1;
-      continue;
-    }
     const confirmations = topConfirmations(item.row, item.analysis);
-    const independentConfirmations = confirmations.filter(
-      (reason) =>
-        !reason.includes("исторических комбинаций") &&
-        !reason.includes("подтверждённых паттернов"),
-    );
-    if (!independentConfirmations.length) {
-      rejected += 1;
-      continue;
-    }
     const backtest = getBacktestEvidence(item.analysis);
     const blocks = scoreBlocks(
       item.row,
@@ -2000,18 +1963,12 @@ async function topText() {
       backtest,
     );
     const rating = weightedScore(blocks);
-    if (rating < 70) {
-      rejected += 1;
-      continue;
-    }
     const matchedPatterns = item.analysis.matchedPatterns
-      .filter((pattern) => pattern.direction === item.analysis.direction)
       .map(
         (pattern) =>
           `${pattern.patternType} (${formatNumber((pattern.successRate ?? 0) * 100, 1)}% WR)`,
       );
     const matchedFactors = item.analysis.matched
-      .filter((combination) => combination.direction === item.analysis.direction)
       .flatMap((combination) =>
         combination.conditions.map((condition) =>
           String(condition.label ?? condition.key ?? "фактор"),
@@ -2037,24 +1994,10 @@ async function topText() {
     .sort(
       (left, right) =>
         right.rating - left.rating ||
-        evidenceScore(right.evidence) - evidenceScore(left.evidence),
+        (right.evidence ? evidenceScore(right.evidence) : 0) -
+          (left.evidence ? evidenceScore(left.evidence) : 0),
     )
     .slice(0, 5);
-
-  if (!ranked.length) {
-    return [
-      "🔥 Лучшие сигналы",
-      "",
-      "Сейчас нет акций, которые одновременно проходят фильтры:",
-      "• минимум 30 исторических наблюдений",
-      "• Win Rate не ниже 55%",
-      "• Profit Factor выше 1,2",
-      "• положительные Test и Expectancy",
-      "• AI Score не ниже 70",
-      "",
-      "После загрузки свежих свечей запустите «🔄 Обновить исследование».",
-    ].join("\n");
-  }
 
   const stats = await getTopAnalysisStats();
   const formatCount = (value: number | string | null | undefined) =>
@@ -2075,21 +2018,21 @@ async function topText() {
     const risk = Math.abs(entry - analysis.stop);
     const reward = Math.abs(analysis.target - entry);
     const riskReward = risk > 0 ? reward / risk : null;
-    const evidenceWinRate = evidence.successRate ?? 0;
-    const evidenceExpectancy =
-      "expectancy" in evidence
+    const evidenceWinRate = evidence?.successRate ?? null;
+    const evidenceExpectancy = evidence
+      ? "expectancy" in evidence
         ? evidence.expectancy
-        : evidence.expectedValue;
-    const evidenceTestWinRate =
-      "testWinRate" in evidence ? evidence.testWinRate : null;
-    const evidencePValue =
-      "pValue" in evidence ? evidence.pValue : null;
-    const evidenceQValue =
-      "qValue" in evidence ? evidence.qValue : null;
+        : evidence.expectedValue
+      : null;
+    const evidenceTestWinRate = evidence && "testWinRate" in evidence
+      ? evidence.testWinRate
+      : null;
+    const evidencePValue = evidence && "pValue" in evidence ? evidence.pValue : null;
+    const evidenceQValue = evidence && "qValue" in evidence ? evidence.qValue : null;
     const evidenceConfidenceHigh =
-      "confidenceHigh" in evidence ? evidence.confidenceHigh : null;
+      evidence && "confidenceHigh" in evidence ? evidence.confidenceHigh : null;
     const evidenceSharpe =
-      "sharpeRatio" in evidence
+      evidence && "sharpeRatio" in evidence
         ? evidence.sharpeRatio
         : candidate.backtest?.sharpeRatio ?? null;
     const scoreLines = [
@@ -2108,12 +2051,13 @@ async function topText() {
     ]
       .map(({ name, value }) => `• ${name}: ${formatNumber(value, 1)}/100`)
       .join("\n");
-    const source =
-      "patternType" in evidence
+    const source = evidence
+      ? "patternType" in evidence
         ? `Паттерн: ${evidence.patternType}`
         : `Комбинация: ${evidence.conditions
             .map((condition) => String(condition.label ?? condition.key ?? "фактор"))
-            .join(" + ")}`;
+            .join(" + ")}`
+      : "Подтверждённая историческая закономерность не найдена";
     return [
       `${index + 1}. 📈 ${row.ticker} — ${directionLabel(analysis.direction)}`,
       `AI Score: ${candidate.rating}/100`,
@@ -2128,34 +2072,41 @@ async function topText() {
       "",
       "Историческая статистика:",
       `• ${source}`,
-      `• Появлений: ${formatCount(evidence.occurrences)}`,
-      `• Win Rate: ${formatNumber(evidenceWinRate * 100, 2)}%`,
+      `• Появлений: ${formatCount(evidence?.occurrences)}`,
+      `• Win Rate: ${formatNumber(
+        evidenceWinRate !== null ? evidenceWinRate * 100 : null,
+        2,
+      )}%`,
       `• Test Win Rate: ${formatNumber(
         evidenceTestWinRate !== null ? evidenceTestWinRate * 100 : null,
         2,
       )}%`,
-      `• Profit Factor: ${formatNumber(evidence.profitFactor)}`,
+      `• Profit Factor: ${formatNumber(evidence?.profitFactor)}`,
       `• Expectancy: ${formatNumber(evidenceExpectancy, 4)}%`,
       `• Train: ${formatNumber(
-        "trainWinRate" in evidence && evidence.trainWinRate !== null
+        evidence &&
+        "trainWinRate" in evidence &&
+        evidence.trainWinRate !== null
           ? evidence.trainWinRate * 100
           : null,
         2,
       )}% WR / ${formatNumber(
-        "trainExpectancy" in evidence
+        evidence && "trainExpectancy" in evidence
           ? evidence.trainExpectancy
-          : "trainExpectedValue" in evidence
+          : evidence && "trainExpectedValue" in evidence
             ? evidence.trainExpectedValue
             : null,
         4,
       )}%`,
-      `• Средняя прибыль/убыток: ${formatNumber(evidence.averageProfit, 4)}% / ${formatNumber(evidence.averageLoss, 4)}%`,
-      `• Просадка: ${formatNumber(evidence.maxDrawdown, 4)}%`,
+      `• Средняя прибыль/убыток: ${formatNumber(evidence?.averageProfit, 4)}% / ${formatNumber(evidence?.averageLoss, 4)}%`,
+      `• Просадка: ${formatNumber(evidence?.maxDrawdown, 4)}%`,
       `• Sharpe: ${formatNumber(evidenceSharpe, 3)}`,
-      `• Лучший TP/SL: ${formatNumber(evidence.bestTakeProfit)}% / ${formatNumber(evidence.bestStopLoss)}%`,
+      `• Лучший TP/SL: ${formatNumber(evidence?.bestTakeProfit)}% / ${formatNumber(evidence?.bestStopLoss)}%`,
       `• p-value/q-value: ${formatNumber(evidencePValue, 6)} / ${formatNumber(evidenceQValue, 6)}`,
       `• Доверительный интервал: ${formatNumber(
-        evidence.confidenceLow !== null && evidence.confidenceLow !== undefined
+        evidence &&
+        evidence.confidenceLow !== null &&
+        evidence.confidenceLow !== undefined
           ? evidence.confidenceLow * 100
           : null,
         2,
@@ -2213,7 +2164,6 @@ async function topText() {
     `• Комбинаций факторов проверено: ${formatCount(stats.combinations_checked)}`,
     `• Статистически значимых комбинаций: ${formatCount(stats.combinations_significant)}`,
     `• Закономерностей совпало: ${formatCount(matchedLaws)}`,
-    `• Сигналов отброшено: ${formatCount(rejected)}`,
     `• Уровней: ${formatCount(stats.levels)}`,
     `• Корреляций: ${formatCount(stats.correlations)}`,
     `• Рыночный контекст: ${macroSummary}`,

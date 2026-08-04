@@ -14,3 +14,9 @@ Raw SQL latest-row timestamps may arrive as strings even though Drizzle schema f
 **Why:** The realtime `/top` analysis failed at runtime when a raw-query timestamp was passed directly to a Drizzle timestamp comparison.
 
 **How to apply:** Normalize timestamp values at the boundary of every raw SQL result used by Telegram handlers.
+
+For the TOP command, ranking and eligibility are separate: show the strongest available stocks even when historical evidence is incomplete, and render unavailable metrics as `—` instead of filtering the stock out.
+
+**Why:** The user explicitly wants a simple TOP-5 ordered from best to worst, without statistical thresholds hiding candidates.
+
+**How to apply:** Keep quality metrics visible in the report, but do not use Score, win rate, profit factor, expectancy, test results, or confirmation counts as exclusion gates for `/top`.
