@@ -17,6 +17,7 @@ import {
   signalsHistory,
 } from "@workspace/db";
 import { logger } from "./logger";
+import { scanMarketAnalogues } from "./market-analog-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
@@ -24,6 +25,7 @@ const MIN_TRADE_PERCENT = 0.3;
 const POLL_TIMEOUT_SECONDS = 25;
 const REFRESH_BUTTON = "🔄 Обновить исследование";
 const SIGNAL_PICKER_BUTTON = "🎯 Сигнал по тикеру";
+const ANALOG_BUTTON = "📊 Аналогичные рыночные ситуации";
 const AI_SCORE_WEIGHTS = {
   trend: 0.12,
   momentum: 0.1,
@@ -44,6 +46,7 @@ const TELEGRAM_MENU = {
     [REFRESH_BUTTON],
     [SIGNAL_PICKER_BUTTON],
     ["🔥 Лучшие сигналы", "📋 Состав IMOEX"],
+    [ANALOG_BUTTON],
     ["📈 Состояние рынка", "❓ Помощь"],
   ],
   resize_keyboard: true,
@@ -1684,6 +1687,15 @@ function isSignalPickerRequest(text: string) {
   );
 }
 
+function isAnalogRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === ANALOG_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "аналогичные рыночные ситуации" ||
+    normalizedText === "/analogs"
+  );
+}
+
 async function signalPicker() {
   const rows = await db
     .select({
@@ -2179,6 +2191,21 @@ async function topText() {
   ].join("\n");
 }
 
+async function analogText() {
+  try {
+    await refreshLatestMarketData();
+    return await scanMarketAnalogues();
+  } catch (error) {
+    logger.error({ err: error }, "Market analog scan failed");
+    return [
+      "📊 Аналогичные рыночные ситуации",
+      "",
+      "Не удалось завершить сканирование аналогов.",
+      "Проверьте свежесть данных MOEX и попробуйте ещё раз.",
+    ].join("\n");
+  }
+}
+
 async function handleMessage(chatId: number, text: string) {
   const trimmedText = text.trim();
   const [command, argument] = trimmedText.split(/\s+/, 2);
@@ -2202,6 +2229,9 @@ async function handleMessage(chatId: number, text: string) {
   }
   if (normalizedCommand === "/top") {
     return topText();
+  }
+  if (isAnalogRequest(text)) {
+    return analogText();
   }
   if (isSignalPickerRequest(text)) {
     return "Нажмите кнопку «🎯 Сигнал по тикеру», чтобы выбрать акцию.";

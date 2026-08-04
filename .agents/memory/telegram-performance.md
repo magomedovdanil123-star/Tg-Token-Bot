@@ -32,3 +32,9 @@ The TOP response is intentionally an actionable compact signal: current entry, l
 **Why:** The bot previously reported an old entry while the market price had already moved materially.
 
 **How to apply:** Run a lightweight latest-only import for the active IMOEX universe, update the current candle/features, then analyze; if refresh fails, do not send stale entries.
+
+The market analog scanner is a separate Telegram flow and persists full-market snapshots plus selected historical matches; it must not alter `/top` or `/signal`.
+
+**Why:** Analog analysis is a parallel research view over all IMOEX stocks, not a replacement for the existing signal engine.
+
+**How to apply:** Keep analog matching, LONG/SHORT outcome aggregation, and its button/command isolated from the core signal handlers.
