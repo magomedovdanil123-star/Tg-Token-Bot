@@ -657,6 +657,8 @@ async function main() {
   const maxTickers = Math.max(1, Math.min(100, integerArg("max-tickers", 100)));
   const startRank = Math.min(99, integerArg("start-rank", 0));
   const skipContext = arg("skip-context", "false") === "true";
+  const missingOnly = arg("missing-only", "false") === "true";
+  const missingLimit = integerArg("missing-limit", 100);
   const end = new Date();
   const start = new Date(end);
   start.setUTCFullYear(start.getUTCFullYear() - years);
@@ -691,7 +693,27 @@ async function main() {
     if (allTickers.length === 0) {
       throw new Error("MOEX вернул пустой состав IMOEX; импорт остановлен");
     }
-    const tickers = allTickers.slice(startRank, startRank + maxTickers);
+    const missingTickers = missingOnly
+      ? (
+          await db.execute(sql`
+            SELECT t.secid
+            FROM moex_tickers t
+            WHERE t.is_active = true
+              AND NOT EXISTS (
+                SELECT 1
+                FROM candles c
+                WHERE c.ticker = t.secid
+                  AND c.timeframe = ${TIMEFRAME}
+              )
+            ORDER BY t.rank
+            LIMIT ${missingLimit}
+          `)
+        ).rows.map((row) => {
+          const secid = String((row as { secid: string }).secid);
+          return allTickers.find((ticker) => ticker.secid === secid);
+        }).filter((ticker): ticker is (typeof allTickers)[number] => Boolean(ticker))
+      : null;
+    const tickers = missingTickers ?? allTickers.slice(startRank, startRank + maxTickers);
     console.log(`Найдено тикеров: ${tickers.length}`);
     // Keep the persisted universe aligned with the current MOEX share list.
     await db.update(moexTickers).set({ isActive: false });
