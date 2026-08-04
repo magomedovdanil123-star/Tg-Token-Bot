@@ -26,6 +26,16 @@ const POLL_TIMEOUT_SECONDS = 25;
 const REFRESH_BUTTON = "🔄 Обновить исследование";
 const SIGNAL_PICKER_BUTTON = "🎯 Сигнал по тикеру";
 const ANALOG_BUTTON = "📊 Аналогичные рыночные ситуации";
+const ACCURACY_BUTTON = "📊 Точность сигналов";
+const SIGNAL_MAX_AGE_MINUTES = 30;
+const PAPER_HORIZON_MINUTES = 360;
+const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
+const PAPER_COMMISSION_ONE_WAY_PERCENT = 0.05;
+const PAPER_SLIPPAGE_ONE_WAY_PERCENT = 0.05;
+const PAPER_TRANSACTION_COST_PERCENT =
+  (PAPER_COMMISSION_ONE_WAY_PERCENT + PAPER_SLIPPAGE_ONE_WAY_PERCENT) * 2;
+const PAPER_MAX_ACTIVE_SIGNALS = 5;
+const PAPER_MAX_DAILY_LOSS_PERCENT = 2;
 const AI_SCORE_WEIGHTS = {
   trend: 0.12,
   momentum: 0.1,
@@ -47,6 +57,7 @@ const TELEGRAM_MENU = {
     [SIGNAL_PICKER_BUTTON],
     ["🔥 Лучшие сигналы", "📋 Состав IMOEX"],
     [ANALOG_BUTTON],
+    [ACCURACY_BUTTON],
     ["📈 Состояние рынка", "❓ Помощь"],
   ],
   resize_keyboard: true,
@@ -54,6 +65,9 @@ const TELEGRAM_MENU = {
 };
 let researchRefreshRunning = false;
 let latestMarketRefresh: Promise<void> | null = null;
+let paperEvaluationRunning = false;
+
+type PaperRecordResult = "recorded" | "duplicate" | "risk_limit";
 
 type TelegramUpdate = {
   update_id: number;
@@ -309,6 +323,365 @@ function directionLabel(direction: SignalDirection) {
   if (direction === "BUY") return "ЛОНГ";
   if (direction === "SELL") return "ШОРТ";
   return "НЕЙТРАЛЬНО";
+}
+
+function dataAgeMinutes(timestamp: Date) {
+  return Math.max(0, (Date.now() - timestamp.getTime()) / 60_000);
+}
+
+function dataFreshnessText(timestamp: Date) {
+  return `Свеча: ${formatDate(timestamp)} · возраст данных: ${formatNumber(dataAgeMinutes(timestamp), 0)} мин`;
+}
+
+function marketRegime(change: number | null | undefined) {
+  if (change !== null && change !== undefined && change > 0.15) return "восходящий";
+  if (change !== null && change !== undefined && change < -0.15) return "нисходящий";
+  return "боковой";
+}
+
+function paperRecordText(result: PaperRecordResult) {
+  if (result === "recorded") return "Сигнал сохранён для проверки результата.";
+  if (result === "duplicate") return "Эта свеча уже была сохранена ранее.";
+  return "Paper-сигнал не сохранён: достигнут лимит риска или активных сигналов.";
+}
+
+async function recordPaperSignal(input: {
+  ticker: string;
+  featureTimestamp: Date;
+  direction: SignalDirection;
+  confidence: number;
+  entryPrice: number;
+  stopPrice: number | null;
+  targetPrice: number | null;
+  horizonMinutes: number;
+  reasons: string[];
+  patternIds: number[];
+  combinationIds: number[];
+  source: "telegram" | "top";
+  metadata?: Record<string, unknown>;
+}): Promise<PaperRecordResult> {
+  if (input.direction === "HOLD") return "risk_limit";
+  const existing = await db
+    .select({ id: signalsHistory.id })
+    .from(signalsHistory)
+    .where(
+      and(
+        eq(signalsHistory.ticker, input.ticker),
+        eq(signalsHistory.timeframe, TIMEFRAME),
+        eq(signalsHistory.candleTimestamp, input.featureTimestamp),
+        eq(signalsHistory.direction, input.direction),
+        sql`COALESCE(${signalsHistory.metadata}->>'source', '') = ${input.source}`,
+      ),
+    )
+    .limit(1);
+  if (existing.length) return "duplicate";
+
+  const limits = await db.execute(sql`
+    SELECT
+      COUNT(*) FILTER (WHERE outcome IS NULL)::int AS active_count,
+      COALESCE(SUM(outcome_percent) FILTER (
+        WHERE outcome IS NOT NULL
+          AND generated_at >= CURRENT_DATE
+      ), 0)::double precision AS daily_result
+    FROM signals_history
+    WHERE metadata ->> 'paperTrading' = 'true'
+  `);
+  const limitRow = (limits.rows[0] ?? {}) as Record<string, unknown>;
+  const activeCount = Number(limitRow.active_count) || 0;
+  const dailyResult = Number(limitRow.daily_result) || 0;
+  if (
+    activeCount >= PAPER_MAX_ACTIVE_SIGNALS ||
+    dailyResult <= -PAPER_MAX_DAILY_LOSS_PERCENT
+  ) {
+    return "risk_limit";
+  }
+
+  await db.insert(signalsHistory).values({
+    ticker: input.ticker,
+    timeframe: TIMEFRAME,
+    candleTimestamp: input.featureTimestamp,
+    direction: input.direction,
+    confidence: input.confidence,
+    entryPrice: input.entryPrice,
+    stopPrice: input.stopPrice,
+    targetPrice: input.targetPrice,
+    horizonMinutes: input.horizonMinutes,
+    reasons: input.reasons,
+    patternIds: input.patternIds,
+    combinationIds: input.combinationIds,
+    metadata: {
+      source: input.source,
+      paperTrading: true,
+      ...input.metadata,
+    },
+  });
+  return "recorded";
+}
+
+async function evaluatePaperSignals() {
+  const pending = await db.execute(sql`
+    SELECT
+      id,
+      ticker,
+      direction,
+      entry_price AS "entryPrice",
+      stop_price AS "stopPrice",
+      target_price AS "targetPrice",
+      horizon_minutes AS "horizonMinutes",
+      candle_timestamp AS "candleTimestamp"
+    FROM signals_history
+    WHERE outcome IS NULL
+      AND metadata ->> 'paperTrading' = 'true'
+    ORDER BY id
+    LIMIT 500
+  `);
+
+  for (const rawRow of pending.rows) {
+    const row = rawRow as Record<string, unknown>;
+    const id = Number(row.id);
+    const ticker = String(row.ticker);
+    const direction = String(row.direction);
+    const entryPrice = Number(row.entryPrice);
+    const stopPrice =
+      row.stopPrice === null || row.stopPrice === undefined
+        ? null
+        : Number(row.stopPrice);
+    const targetPrice =
+      row.targetPrice === null || row.targetPrice === undefined
+        ? null
+        : Number(row.targetPrice);
+    const horizonMinutes = Number(row.horizonMinutes) || PAPER_HORIZON_MINUTES;
+    const candleTimestamp =
+      row.candleTimestamp instanceof Date
+        ? row.candleTimestamp
+        : new Date(String(row.candleTimestamp));
+    if (
+      !Number.isFinite(id) ||
+      !Number.isFinite(entryPrice) ||
+      !Number.isFinite(candleTimestamp.getTime()) ||
+      (direction !== "BUY" && direction !== "SELL")
+    ) {
+      continue;
+    }
+
+    const deadline = new Date(candleTimestamp.getTime() + horizonMinutes * 60_000);
+    const candlesResult = await db.execute(sql`
+      SELECT timestamp, high, low, close
+      FROM candles
+      WHERE ticker = ${ticker}
+        AND timeframe = ${TIMEFRAME}
+        AND timestamp > ${candleTimestamp}
+        AND timestamp <= ${deadline}
+      ORDER BY timestamp
+    `);
+    if (!candlesResult.rows.length) continue;
+
+    let outcome: string | null = null;
+    let outcomePercent: number | null = null;
+    let grossOutcomePercent: number | null = null;
+    let outcomeAt: Date | null = null;
+    let lastClose: number | null = null;
+    let lastTimestamp: Date | null = null;
+
+    for (const rawCandle of candlesResult.rows) {
+      const candle = rawCandle as Record<string, unknown>;
+      const timestamp =
+        candle.timestamp instanceof Date
+          ? candle.timestamp
+          : new Date(String(candle.timestamp));
+      const high = Number(candle.high);
+      const low = Number(candle.low);
+      const close = Number(candle.close);
+      if (
+        !Number.isFinite(timestamp.getTime()) ||
+        !Number.isFinite(high) ||
+        !Number.isFinite(low) ||
+        !Number.isFinite(close)
+      ) {
+        continue;
+      }
+      lastClose = close;
+      lastTimestamp = timestamp;
+      const hitTarget =
+        targetPrice !== null &&
+        Number.isFinite(targetPrice) &&
+        (direction === "BUY" ? high >= targetPrice : low <= targetPrice);
+      const hitStop =
+        stopPrice !== null &&
+        Number.isFinite(stopPrice) &&
+        (direction === "BUY" ? low <= stopPrice : high >= stopPrice);
+
+      if (hitTarget || hitStop) {
+        // If both levels are inside one candle, use SL conservatively.
+        const isWin = hitTarget && !hitStop;
+        const exitPrice = isWin ? targetPrice : stopPrice;
+        if (exitPrice === null || !Number.isFinite(exitPrice)) continue;
+        outcome = isWin ? "TP" : "SL";
+        grossOutcomePercent =
+          direction === "BUY"
+            ? ((exitPrice - entryPrice) / entryPrice) * 100
+            : ((entryPrice - exitPrice) / entryPrice) * 100;
+        outcomePercent = grossOutcomePercent - PAPER_TRANSACTION_COST_PERCENT;
+        outcomeAt = timestamp;
+        break;
+      }
+    }
+
+    if (
+      outcome === null &&
+      lastClose !== null &&
+      lastTimestamp !== null &&
+      lastTimestamp.getTime() >= deadline.getTime()
+    ) {
+      grossOutcomePercent =
+        direction === "BUY"
+          ? ((lastClose - entryPrice) / entryPrice) * 100
+          : ((entryPrice - lastClose) / entryPrice) * 100;
+      outcomePercent = grossOutcomePercent - PAPER_TRANSACTION_COST_PERCENT;
+      outcome = outcomePercent >= 0 ? "TIMEOUT_WIN" : "TIMEOUT_LOSS";
+      outcomeAt = lastTimestamp;
+    }
+
+    if (outcome && outcomeAt && outcomePercent !== null) {
+      await db.execute(sql`
+        UPDATE signals_history
+        SET outcome = ${outcome},
+            outcome_percent = ${outcomePercent},
+            outcome_at = ${outcomeAt},
+            metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({
+              paperCostPercent: PAPER_TRANSACTION_COST_PERCENT,
+              commissionOneWayPercent: PAPER_COMMISSION_ONE_WAY_PERCENT,
+              slippageOneWayPercent: PAPER_SLIPPAGE_ONE_WAY_PERCENT,
+              grossOutcomePercent,
+            })}::jsonb
+        WHERE id = ${id}
+          AND outcome IS NULL
+      `);
+    }
+  }
+}
+
+async function accuracyText() {
+  await evaluatePaperSignals();
+  const summary = await db.execute(sql`
+    SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE outcome IS NULL)::int AS pending,
+      COUNT(*) FILTER (WHERE outcome IN ('TP', 'TIMEOUT_WIN'))::int AS wins,
+      COUNT(*) FILTER (WHERE outcome IN ('SL', 'TIMEOUT_LOSS'))::int AS losses,
+      AVG(outcome_percent) FILTER (WHERE outcome IS NOT NULL) AS "averagePercent",
+      AVG((metadata->>'grossOutcomePercent')::double precision)
+        FILTER (WHERE outcome IS NOT NULL) AS "grossAveragePercent",
+      COALESCE(SUM(outcome_percent) FILTER (WHERE outcome IS NOT NULL), 0)
+        AS "netTotalPercent",
+      MIN(generated_at) AS first_signal,
+      MAX(generated_at) AS last_signal
+    FROM signals_history
+    WHERE metadata ->> 'paperTrading' = 'true'
+  `);
+  const breakdown = await db.execute(sql`
+    SELECT
+      ticker,
+      direction,
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE outcome IN ('TP', 'TIMEOUT_WIN'))::int AS wins,
+      COUNT(*) FILTER (WHERE outcome IN ('SL', 'TIMEOUT_LOSS'))::int AS losses,
+      AVG(outcome_percent) FILTER (WHERE outcome IS NOT NULL) AS "averagePercent"
+    FROM signals_history
+    WHERE metadata ->> 'paperTrading' = 'true'
+      AND outcome IS NOT NULL
+    GROUP BY ticker, direction
+    ORDER BY "averagePercent" DESC NULLS LAST, total DESC
+    LIMIT 10
+  `);
+  const regimeBreakdown = await db.execute(sql`
+    SELECT
+      COALESCE(metadata->>'marketRegime', 'не указан') AS regime,
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE outcome IN ('TP', 'TIMEOUT_WIN'))::int AS wins,
+      AVG(outcome_percent) AS "averagePercent"
+    FROM signals_history
+    WHERE metadata ->> 'paperTrading' = 'true'
+      AND outcome IS NOT NULL
+    GROUP BY COALESCE(metadata->>'marketRegime', 'не указан')
+    ORDER BY "averagePercent" DESC NULLS LAST
+  `);
+  const row = (summary.rows[0] ?? {}) as Record<string, unknown>;
+  const total = Number(row.total) || 0;
+  const pending = Number(row.pending) || 0;
+  const wins = Number(row.wins) || 0;
+  const losses = Number(row.losses) || 0;
+  const closed = wins + losses;
+  const winRate = closed ? (wins / closed) * 100 : null;
+  const grossAverage = Number(row.grossAveragePercent);
+  const netAverage = Number(row.averagePercent);
+  const netTotal = Number(row.netTotalPercent) || 0;
+
+  if (!total) {
+    return [
+      "📊 ТОЧНОСТЬ СИГНАЛОВ",
+      "",
+      "Paper trading пока не накопил завершённых сигналов.",
+      "Нажимайте «🔥 Лучшие сигналы» или запрашивайте /signal ТИКЕР.",
+      "Результат каждого сигнала будет проверен через 6 часов.",
+    ].join("\n");
+  }
+
+  const latest = await db.execute(sql`
+    SELECT ticker, direction, outcome, outcome_percent, generated_at
+    FROM signals_history
+    WHERE metadata ->> 'paperTrading' = 'true'
+      AND outcome IS NOT NULL
+    ORDER BY outcome_at DESC NULLS LAST, id DESC
+    LIMIT 5
+  `);
+  const latestLines = latest.rows.map((raw) => {
+    const item = raw as Record<string, unknown>;
+    const percent = Number(item.outcome_percent);
+    return `${item.ticker} ${directionLabel(String(item.direction) as SignalDirection)} · ${String(item.outcome)} · ${Number.isFinite(percent) ? `${percent >= 0 ? "+" : ""}${formatNumber(percent)}%` : "—"}`;
+  });
+  const breakdownLines = breakdown.rows.map((raw) => {
+    const item = raw as Record<string, unknown>;
+    const totalCases = Number(item.total) || 0;
+    const winsByTicker = Number(item.wins) || 0;
+    const rate = totalCases ? (winsByTicker / totalCases) * 100 : null;
+    return `${item.ticker} ${directionLabel(String(item.direction) as SignalDirection)} · ${formatNumber(rate, 0)}% (${winsByTicker}/${totalCases}) · среднее ${formatNumber(Number(item.averagePercent))}%`;
+  });
+  const regimeLines = regimeBreakdown.rows.map((raw) => {
+    const item = raw as Record<string, unknown>;
+    const totalCases = Number(item.total) || 0;
+    const winsByRegime = Number(item.wins) || 0;
+    const rate = totalCases ? (winsByRegime / totalCases) * 100 : null;
+    return `${String(item.regime)} · ${formatNumber(rate, 0)}% (${winsByRegime}/${totalCases}) · среднее ${formatNumber(Number(item.averagePercent))}%`;
+  });
+
+  return [
+    "📊 ТОЧНОСТЬ СИГНАЛОВ",
+    "",
+    "Режим: PAPER TRADING — реальные сделки не совершаются",
+    `Всего сигналов: ${total}`,
+    `Завершено: ${closed}`,
+    `Ожидают проверки: ${pending}`,
+    `Прибыльных: ${wins}`,
+    `Убыточных: ${losses}`,
+    `Фактический win rate: ${formatNumber(winRate, 1)}%`,
+    `Средний валовый результат: ${formatNumber(grossAverage, 2)}%`,
+    `Средний чистый результат: ${formatNumber(netAverage, 2)}%`,
+    `Накопленный чистый результат: ${netTotal >= 0 ? "+" : ""}${formatNumber(netTotal, 2)}%`,
+    `Издержки в расчёте: ${formatNumber(PAPER_TRANSACTION_COST_PERCENT, 2)}% на сигнал`,
+    `Лимиты paper: до ${PAPER_MAX_ACTIVE_SIGNALS} активных сигналов, дневной лимит ${PAPER_MAX_DAILY_LOSS_PERCENT}%`,
+    "",
+    "По акциям и направлениям:",
+    ...(breakdownLines.length ? breakdownLines : ["пока нет завершённых"]),
+    "",
+    "По режимам IMOEX:",
+    ...(regimeLines.length ? regimeLines : ["пока нет завершённых"]),
+    "",
+    "Последние завершённые:",
+    ...(latestLines.length ? latestLines : ["пока нет"]),
+    "",
+    "Каждый сигнал проверяется по TP/SL и результату через 6 часов.",
+  ].join("\n");
 }
 
 function historicalPercent(value: number | null | undefined) {
@@ -1661,6 +2034,7 @@ function helpText() {
     "/imoex — состав индекса IMOEX",
     "/market — состояние IMOEX",
     "/top — лучшие текущие сигналы",
+    "/accuracy — фактическая точность paper-сигналов",
     "/refresh — полностью обновить данные и исследование",
     "/help — справка",
     "",
@@ -1693,6 +2067,15 @@ function isAnalogRequest(text: string) {
     normalizedText === ANALOG_BUTTON.toLocaleLowerCase("ru-RU") ||
     normalizedText === "аналогичные рыночные ситуации" ||
     normalizedText === "/analogs"
+  );
+}
+
+function isAccuracyRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === ACCURACY_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "точность сигналов" ||
+    normalizedText === "/accuracy"
   );
 }
 
@@ -1978,6 +2361,17 @@ async function imoexText() {
 }
 
 async function signalText(ticker: string) {
+  try {
+    await refreshLatestMarketData();
+  } catch (error) {
+    logger.error({ err: error, ticker }, "Latest MOEX refresh failed before ticker signal");
+    return [
+      `📊 ${ticker}`,
+      "",
+      "Не удалось получить свежую свечу MOEX.",
+      "Старые данные не использую, чтобы не отправлять устаревший вход.",
+    ].join("\n");
+  }
   const feature = await getLatestFeature(ticker);
   if (!feature) {
     const knownTicker = await db
@@ -1989,8 +2383,18 @@ async function signalText(ticker: string) {
       ? `${ticker} сейчас не входит в активный состав IMOEX или по нему нет свежих данных.`
       : `${ticker} не входит в текущий состав IMOEX.\nСписок: /imoex`;
   }
+  if (dataAgeMinutes(feature.timestamp) > SIGNAL_MAX_AGE_MINUTES) {
+    return [
+      `📊 ${ticker}`,
+      "",
+      "⚠️ Данные устарели. Сигнал не формирую.",
+      dataFreshnessText(feature.timestamp),
+      `Допустимый возраст данных: до ${SIGNAL_MAX_AGE_MINUTES} минут.`,
+    ].join("\n");
+  }
 
   const analysis = await analyzeSignal(ticker, feature);
+  const latestMarket = await getLatestMarket();
   const combinationIds = analysis.matched.map((combination) => combination.id);
   const patternIds = analysis.matchedPatterns.map((pattern) => pattern.id);
   const bestCombination =
@@ -1998,26 +2402,35 @@ async function signalText(ticker: string) {
       .filter((combination) => combination.direction === analysis.direction)
       .sort((left, right) => (right.expectedValue ?? -Infinity) - (left.expectedValue ?? -Infinity))[0] ??
     analysis.matched[0];
-  await db.insert(signalsHistory).values({
+  const recorded = await recordPaperSignal({
     ticker,
-    timeframe: TIMEFRAME,
-    candleTimestamp: feature.timestamp,
+    featureTimestamp: feature.timestamp,
     direction: analysis.direction,
     confidence: analysis.confidence,
     entryPrice: feature.close,
     stopPrice: analysis.stop,
     targetPrice: analysis.target,
-    horizonMinutes: analysis.horizonMinutes,
+    horizonMinutes: PAPER_HORIZON_MINUTES,
     reasons: analysis.reasons,
     patternIds,
     combinationIds,
+    source: "telegram",
     metadata: {
-      source: "telegram",
       validatedCombinations: combinationIds,
       validatedPatterns: patternIds,
       marketStructure: analysis.marketStructure,
+      marketRegime: marketRegime(latestMarket?.imoexChange),
     },
   });
+  const riskDistance = Math.abs(feature.close - analysis.stop);
+  const rewardDistance = Math.abs(analysis.target - feature.close);
+  const rewardRisk =
+    riskDistance > 0 && Number.isFinite(riskDistance) && Number.isFinite(rewardDistance)
+      ? rewardDistance / riskDistance
+      : null;
+  const validUntil = new Date(
+    feature.timestamp.getTime() + PAPER_HORIZON_MINUTES * 60_000,
+  );
 
   return [
     `📊 ${ticker}`,
@@ -2035,7 +2448,11 @@ async function signalText(ticker: string) {
     `Стоп: ${formatNumber(analysis.stop)}`,
     `Цель: ${formatNumber(analysis.target)}`,
     `Горизонт: ${analysis.horizonMinutes} минут`,
-    `Свеча: ${formatDate(feature.timestamp)}`,
+    `Действует до: ${formatDate(validUntil)}`,
+    `Потенциал / риск: ${formatNumber(rewardRisk, 2)} к 1`,
+    dataFreshnessText(feature.timestamp),
+    "Режим: PAPER TRADING — сделка только отслеживается, реальные деньги не используются",
+    paperRecordText(recorded),
     "",
     "Важно: это статистический исследовательский сигнал, не финансовая рекомендация.",
   ].join("\n");
@@ -2135,6 +2552,56 @@ async function topText() {
     )
     .slice(0, 5);
 
+  await Promise.all(
+    ranked.map(async (candidate) => {
+      if (dataAgeMinutes(candidate.row.timestamp) > SIGNAL_MAX_AGE_MINUTES) return;
+      const entry = candidate.row.close;
+      const evidence = candidate.evidence;
+      const takeProfitPercent =
+        historicalPercent(evidence?.bestTakeProfit) ??
+        historicalMedianPercent(
+          context.combinations,
+          candidate.analysis.direction,
+          "bestTakeProfit",
+        );
+      const stopLossPercent =
+        historicalPercent(evidence?.bestStopLoss) ??
+        historicalMedianPercent(
+          context.combinations,
+          candidate.analysis.direction,
+          "bestStopLoss",
+        );
+      const target =
+        candidate.analysis.direction === "BUY"
+          ? entry * (1 + takeProfitPercent / 100)
+          : entry * (1 - takeProfitPercent / 100);
+      const stop =
+        candidate.analysis.direction === "BUY"
+          ? entry * (1 - stopLossPercent / 100)
+          : entry * (1 + stopLossPercent / 100);
+      const regime = marketRegime(macroPressure(context.macro));
+      await recordPaperSignal({
+        ticker: candidate.row.ticker,
+        featureTimestamp: candidate.row.timestamp,
+        direction: candidate.analysis.direction,
+        confidence: candidate.rating,
+        entryPrice: entry,
+        stopPrice: stop,
+        targetPrice: target,
+        horizonMinutes: PAPER_HORIZON_MINUTES,
+        reasons: candidate.analysis.reasons,
+        patternIds: candidate.analysis.matchedPatterns.map((pattern) => pattern.id),
+        combinationIds: candidate.analysis.matched.map((combination) => combination.id),
+        source: "top",
+        metadata: {
+          score: candidate.rating,
+          paperHorizonMinutes: PAPER_HORIZON_MINUTES,
+          marketRegime: regime,
+        },
+      });
+    }),
+  );
+
   const stats = await getTopAnalysisStats();
   const formatCount = (value: number | string | null | undefined) =>
     value === null || value === undefined
@@ -2176,6 +2643,8 @@ async function topText() {
       `Тейк: ${formatNumber(target)} (${analysis.direction === "BUY" ? "+" : "-"}${formatNumber(takeProfitPercent)}%)`,
       `Стоп: ${formatNumber(stop)} (${analysis.direction === "BUY" ? "-" : "+"}${formatNumber(stopLossPercent)}%)`,
       `Горизонт: ${formatNumber(horizon, 0)} минут`,
+      dataFreshnessText(row.timestamp),
+      "Paper-проверка: результат через 6 часов",
     ]
       .filter((line): line is string => Boolean(line))
       .join("\n");
@@ -2229,6 +2698,9 @@ async function handleMessage(chatId: number, text: string) {
   }
   if (normalizedCommand === "/top") {
     return topText();
+  }
+  if (isAccuracyRequest(text)) {
+    return accuracyText();
   }
   if (isAnalogRequest(text)) {
     return analogText();
@@ -2337,10 +2809,22 @@ export function startTelegramBot() {
   let offset = 0;
   const controller = new AbortController();
   const client = createTelegramClient(token);
+  const paperEvaluationTimer = setInterval(() => {
+    if (paperEvaluationRunning) return;
+    paperEvaluationRunning = true;
+    void evaluatePaperSignals()
+      .catch((error) => {
+        logger.error({ err: error }, "Paper signal evaluation failed");
+      })
+      .finally(() => {
+        paperEvaluationRunning = false;
+      });
+  }, PAPER_EVALUATION_INTERVAL_MS);
 
   const stop = () => {
     running = false;
     controller.abort();
+    clearInterval(paperEvaluationTimer);
   };
 
   void (async () => {
@@ -2354,6 +2838,7 @@ export function startTelegramBot() {
           { command: "market", description: "Состояние рынка" },
           { command: "top", description: "Лучшие сигналы" },
           { command: "analogs", description: "Аналогичные рыночные ситуации" },
+          { command: "accuracy", description: "Точность paper-сигналов" },
           { command: "refresh", description: "Обновить данные и исследование" },
           { command: "help", description: "Справка" },
         ]),
