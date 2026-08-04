@@ -173,6 +173,12 @@ export const patterns = pgTable(
       .defaultNow(),
   },
   (table) => [
+    uniqueIndex("patterns_unique").on(
+      table.ticker,
+      table.name,
+      table.timeframe,
+      table.direction,
+    ),
     index("patterns_ticker_success_idx").on(
       table.ticker,
       table.isActive,
@@ -249,6 +255,80 @@ export const marketObservations = pgTable(
   ],
 );
 
+export const marketLevels = pgTable(
+  "market_levels",
+  {
+    id: serial("id").primaryKey(),
+    ticker: varchar("ticker", { length: 32 }).notNull(),
+    timeframe: varchar("timeframe", { length: 16 }).notNull(),
+    levelType: varchar("level_type", { length: 32 }).notNull(),
+    windowBars: integer("window_bars").notNull(),
+    price: doublePrecision("price").notNull(),
+    strength: doublePrecision("strength"),
+    touches: integer("touches").notNull().default(0),
+    calculatedAt: timestamp("calculated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+  },
+  (table) => [
+    uniqueIndex("market_levels_unique").on(
+      table.ticker,
+      table.timeframe,
+      table.levelType,
+      table.windowBars,
+    ),
+    index("market_levels_lookup_idx").on(
+      table.ticker,
+      table.timeframe,
+      table.levelType,
+    ),
+  ],
+);
+
+export const assetCorrelations = pgTable(
+  "asset_correlations",
+  {
+    id: serial("id").primaryKey(),
+    assetTicker: varchar("asset_ticker", { length: 32 }).notNull(),
+    benchmarkTicker: varchar("benchmark_ticker", { length: 32 }).notNull(),
+    timeframe: varchar("timeframe", { length: 16 }).notNull(),
+    windowBars: integer("window_bars").notNull(),
+    correlation: doublePrecision("correlation"),
+    sampleCount: integer("sample_count").notNull().default(0),
+    periodStart: timestamp("period_start", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    periodEnd: timestamp("period_end", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    calculatedAt: timestamp("calculated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+  },
+  (table) => [
+    uniqueIndex("asset_correlations_unique").on(
+      table.assetTicker,
+      table.benchmarkTicker,
+      table.timeframe,
+      table.windowBars,
+    ),
+    index("asset_correlations_lookup_idx").on(
+      table.assetTicker,
+      table.timeframe,
+    ),
+  ],
+);
+
 export const macroIndicators = pgTable(
   "macro_indicators",
   {
@@ -306,7 +386,10 @@ export const patternOccurrences = pgTable(
       .references(() => patterns.id, { onDelete: "cascade" }),
     ticker: varchar("ticker", { length: 32 }).notNull(),
     timeframe: varchar("timeframe", { length: 16 }).notNull(),
-    occurredAt: marketTimestamp.notNull(),
+    occurredAt: timestamp("timestamp", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
     entryPrice: doublePrecision("entry_price").notNull(),
     direction: varchar("direction", { length: 16 }).notNull(),
     result15m: doublePrecision("result_15m"),
@@ -317,6 +400,12 @@ export const patternOccurrences = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   },
   (table) => [
+    uniqueIndex("pattern_occurrences_unique").on(
+      table.patternId,
+      table.ticker,
+      table.timeframe,
+      table.occurredAt,
+    ),
     index("pattern_occurrences_pattern_date_idx").on(
       table.patternId,
       table.occurredAt,
@@ -339,6 +428,13 @@ export const featureCombinations = pgTable(
     occurrences: integer("occurrences").notNull().default(0),
     successRate: doublePrecision("success_rate"),
     averageProfit: doublePrecision("average_profit"),
+    averageLoss: doublePrecision("average_loss"),
+    expectedValue: doublePrecision("expected_value"),
+    profitFactor: doublePrecision("profit_factor"),
+    sharpeRatio: doublePrecision("sharpe_ratio"),
+    pValue: doublePrecision("p_value"),
+    confidenceLow: doublePrecision("confidence_low"),
+    confidenceHigh: doublePrecision("confidence_high"),
     maxDrawdown: doublePrecision("max_drawdown"),
     holdingMinutes: integer("holding_minutes"),
     direction: varchar("direction", { length: 16 }),
@@ -410,6 +506,11 @@ export const strategyResults = pgTable(
       .$type<Record<string, unknown>[]>(),
     winRate: doublePrecision("win_rate"),
     profitFactor: doublePrecision("profit_factor"),
+    expectedValue: doublePrecision("expected_value"),
+    sharpeRatio: doublePrecision("sharpe_ratio"),
+    pValue: doublePrecision("p_value"),
+    confidenceLow: doublePrecision("confidence_low"),
+    confidenceHigh: doublePrecision("confidence_high"),
     maxDrawdown: doublePrecision("max_drawdown"),
     averageProfit: doublePrecision("average_profit"),
     averageLoss: doublePrecision("average_loss"),
@@ -452,6 +553,11 @@ export const backtestResults = pgTable(
     maxDrawdown: doublePrecision("max_drawdown"),
     averageProfit: doublePrecision("average_profit"),
     averageLoss: doublePrecision("average_loss"),
+    expectedValue: doublePrecision("expected_value"),
+    sharpeRatio: doublePrecision("sharpe_ratio"),
+    pValue: doublePrecision("p_value"),
+    confidenceLow: doublePrecision("confidence_low"),
+    confidenceHigh: doublePrecision("confidence_high"),
     netReturn: doublePrecision("net_return"),
     equityCurve: jsonb("equity_curve").$type<
       { timestamp: string; equity: number }[]

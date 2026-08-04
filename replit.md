@@ -13,6 +13,12 @@ Stores MOEX market candles, technical indicators, market context, and research r
 - `pnpm --filter @workspace/scripts run download-context` — load daily IMOEX, RTSI, USD/RUB, EUR/RUB, and CNY/RUB context rows
 - `pnpm --filter @workspace/scripts run refresh-features` — recalculate and update all stored feature rows after schema/indicator changes
 - `pnpm --filter @workspace/scripts run refresh-features -- --features-start=45 --features-limit=20` — refresh a bounded ticker range
+- `pnpm --filter @workspace/scripts run discover-patterns` — discover statistically positive feature combinations and save strategies/backtests
+- `pnpm --filter @workspace/scripts run discover-patterns -- --candidate-start=1 --candidate-end=3` — run a bounded discovery package
+- `pnpm --filter @workspace/scripts run discover-candle-patterns` — discover candle models and save their historical outcomes
+- `pnpm --filter @workspace/scripts run refresh-levels-correlations` — refresh rolling support/resistance levels and IMOEX correlations
+- `pnpm --filter @workspace/scripts run research-refresh -- --skip-import --skip-context` — rerun Discovery packages and candle models without refetching MOEX data
+- `pnpm --filter @workspace/scripts run research-refresh` — full update: MOEX candles, market context, feature Discovery, and candle models
 - `pnpm --filter @workspace/scripts run download-moex -- --years=1 --max-tickers=10` — run a smaller import
 - `pnpm --filter @workspace/scripts run download-moex -- --years=2 --start-rank=10 --max-tickers=10 --skip-context=true` — resume a chunk without reloading IMOEX
 - Required env: `DATABASE_URL` — Postgres connection string
@@ -30,7 +36,7 @@ Stores MOEX market candles, technical indicators, market context, and research r
 
 - `lib/db/src/schema/index.ts` — PostgreSQL schema for tickers, candles, features, market context, patterns, and import runs.
 - `scripts/src/download-moex-data.ts` — paginated MOEX ISS importer and technical indicator calculation.
-- `artifacts/api-server` — existing API server; Telegram bot code is intentionally not part of this data setup.
+- `artifacts/api-server` — existing API server and Telegram bot integration.
 
 ## Architecture decisions
 
