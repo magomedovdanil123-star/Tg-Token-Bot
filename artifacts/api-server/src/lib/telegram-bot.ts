@@ -508,7 +508,13 @@ async function getTopRows() {
     WHERE t.is_active = true
       AND t.secid <> 'IMOEX'
   `);
-  return result.rows as unknown as TopRow[];
+  return (result.rows as unknown as TopRow[]).map((row) => ({
+    ...row,
+    timestamp:
+      row.timestamp instanceof Date
+        ? row.timestamp
+        : new Date(row.timestamp as unknown as string),
+  }));
 }
 
 async function getValidatedCombinations(): Promise<Combination[]> {
