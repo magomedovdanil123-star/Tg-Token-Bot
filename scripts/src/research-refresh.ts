@@ -57,6 +57,10 @@ async function main() {
   }
 
   steps.push({
+    name: "Распознавание профессиональных паттернов",
+    args: ["./src/discover-professional-patterns.ts"],
+  });
+  steps.push({
     name: "Исследовательское ядро комбинаций факторов",
     args: [
       "./src/research-discover.ts",

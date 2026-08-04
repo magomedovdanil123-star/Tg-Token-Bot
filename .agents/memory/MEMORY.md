@@ -2,3 +2,4 @@
 - [Research database alignment](research-database-alignment.md) — existing pattern occurrence records use `timestamp`; preserve live column names when extending the schema.
 - [Telegram bot performance](telegram-performance.md) — use indexed latest-row lookups and map reply-keyboard labels to slash-command handlers.
 - [Research engine policy](research-engine-policy.md) — active Telegram signals must come only from statistically validated auto-engine combinations, never legacy hardcoded strategies.
+- [Pattern discovery scale](pattern-discovery-scale.md) — structural pattern detectors need cooldown/sampling and per-ticker checkpointed statistics to avoid event explosions.

@@ -51,6 +51,7 @@ type ResearchRow = {
   red_streak: number | null;
   candle_range: number | null;
   historical_volatility: number | null;
+  patternKeys: string[];
 };
 
 type LocalRow = ResearchRow & { timestampMs: number };
@@ -60,6 +61,28 @@ type Factor = {
   label: string;
   matches: (row: LocalRow, quantiles: Quantiles) => boolean;
 };
+
+const PROFESSIONAL_PATTERN_FACTORS = [
+  ["Hammer", "BUY"], ["Inverted Hammer", "BUY"], ["Hanging Man", "SELL"], ["Shooting Star", "SELL"],
+  ["Doji", "BUY"], ["Dragonfly Doji", "BUY"], ["Gravestone Doji", "SELL"], ["Long Legged Doji", "BUY"],
+  ["Engulfing Bullish", "BUY"], ["Engulfing Bearish", "SELL"], ["Harami", "BUY"], ["Harami", "SELL"],
+  ["Piercing Line", "BUY"], ["Dark Cloud Cover", "SELL"], ["Morning Star", "BUY"], ["Evening Star", "SELL"],
+  ["Three White Soldiers", "BUY"], ["Three Black Crows", "SELL"], ["Tweezer Top", "SELL"], ["Tweezer Bottom", "BUY"],
+  ["Marubozu", "BUY"], ["Marubozu", "SELL"], ["Spinning Top", "BUY"], ["Spinning Top", "SELL"],
+  ["Belt Hold", "BUY"], ["Belt Hold", "SELL"], ["Kicking", "BUY"], ["Kicking", "SELL"],
+  ["Rising Three Methods", "BUY"], ["Falling Three Methods", "SELL"],
+  ["Double Top", "SELL"], ["Double Bottom", "BUY"], ["Triple Top", "SELL"], ["Triple Bottom", "BUY"],
+  ["Ascending Triangle", "BUY"], ["Descending Triangle", "SELL"], ["Symmetrical Triangle", "BUY"], ["Symmetrical Triangle", "SELL"],
+  ["Rising Wedge", "SELL"], ["Falling Wedge", "BUY"], ["Flag", "BUY"], ["Flag", "SELL"],
+  ["Pennant", "BUY"], ["Pennant", "SELL"], ["Rectangle", "BUY"], ["Rectangle", "SELL"],
+  ["Channel", "BUY"], ["Channel", "SELL"], ["Cup and Handle", "BUY"],
+  ["Head and Shoulders", "SELL"], ["Inverse Head and Shoulders", "BUY"],
+  ["BOS", "BUY"], ["BOS", "SELL"], ["CHOCH", "BUY"], ["CHOCH", "SELL"],
+  ["Liquidity Sweep", "BUY"], ["Liquidity Sweep", "SELL"], ["Equal Highs", "SELL"], ["Equal Lows", "BUY"],
+  ["Order Block", "BUY"], ["Order Block", "SELL"], ["Breaker Block", "BUY"], ["Breaker Block", "SELL"],
+  ["Mitigation Block", "BUY"], ["Mitigation Block", "SELL"], ["Fair Value Gap", "BUY"], ["Fair Value Gap", "SELL"],
+  ["Imbalance", "BUY"], ["Imbalance", "SELL"], ["Premium/Discount Zone", "BUY"], ["Premium/Discount Zone", "SELL"],
+] as const;
 
 type Quantiles = Record<string, { low: number; high: number }>;
 
@@ -235,7 +258,7 @@ function buildFactors(): Factor[] {
     const value = q[key]?.[side];
     return value !== undefined;
   };
-  return [
+  const baseFactors: Factor[] = [
     { key: "price_above_ema20", label: "Цена выше EMA20", matches: (r) => r.ema_20 !== null && r.close > r.ema_20 },
     { key: "price_below_ema20", label: "Цена ниже EMA20", matches: (r) => r.ema_20 !== null && r.close < r.ema_20 },
     { key: "ema20_above_ema50", label: "EMA20 выше EMA50", matches: (r) => r.ema_20 !== null && r.ema_50 !== null && r.ema_20 > r.ema_50 },
@@ -273,6 +296,12 @@ function buildFactors(): Factor[] {
     { key: "volatility_high", label: "Волатильность в верхнем квантиле", matches: (r, q) => r.historical_volatility !== null && r.historical_volatility >= q.volatility.high },
     { key: "volatility_low", label: "Волатильность в нижнем квантиле", matches: (r, q) => r.historical_volatility !== null && r.historical_volatility <= q.volatility.low },
   ];
+  const patternFactors: Factor[] = PROFESSIONAL_PATTERN_FACTORS.map(([name, direction]) => ({
+    key: `pattern:${name}:${direction}`,
+    label: `${name} (${direction})`,
+    matches: (row: LocalRow) => row.patternKeys.includes(`${name}:${direction}`),
+  }));
+  return [...baseFactors, ...patternFactors];
 }
 
 function localRows(rows: ResearchRow[]) {
@@ -419,7 +448,14 @@ async function tickerRows(ticker: string) {
       f.atr, f.vwap, f.bb_upper, f.bb_middle, f.bb_lower, f.bb_width,
       f.relative_volume, f.avg_volume_20, f.acceleration, f.price_change_3, f.price_change_5,
       f.body_size, f.body_to_range, f.upper_shadow, f.lower_shadow,
-      f.green_streak, f.red_streak, f.candle_range, f.historical_volatility
+      f.green_streak, f.red_streak, f.candle_range, f.historical_volatility,
+      COALESCE((
+        SELECT array_agg(dp.pattern_type || ':' || dp.direction)
+        FROM detected_patterns dp
+        WHERE dp.ticker = c.ticker
+          AND dp.timeframe = ${TIMEFRAME}
+          AND dp.end_timestamp = c.timestamp
+      ), ARRAY[]::text[]) AS "patternKeys"
     FROM candles c
     INNER JOIN features f ON f.ticker = c.ticker AND f.timestamp = c.timestamp
     WHERE c.ticker = ${ticker} AND c.timeframe = ${TIMEFRAME}
@@ -704,7 +740,12 @@ async function main() {
       const active = factors
         .map((factor, factorIndex) => (factor.matches(rows[index], quantiles) ? factorIndex : -1))
         .filter((factorIndex) => factorIndex >= 0);
-      const rowCombinations = combinations(active.slice(0, maxActiveFactors), maxCombinationSize);
+      const patternStart = factors.length - PROFESSIONAL_PATTERN_FACTORS.length;
+      const patternActive = active.filter((factorIndex) => factorIndex >= patternStart).slice(0, 2);
+      const baseActive = active
+        .filter((factorIndex) => factorIndex < patternStart)
+        .slice(0, Math.max(0, maxActiveFactors - patternActive.length));
+      const rowCombinations = combinations([...baseActive, ...patternActive], maxCombinationSize);
       combinationsSeen += rowCombinations.length;
       totalEvents += 1;
       for (const combo of rowCombinations) {

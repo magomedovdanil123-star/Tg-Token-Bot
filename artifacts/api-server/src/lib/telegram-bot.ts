@@ -11,6 +11,8 @@ import {
   marketLevels,
   moexTickers,
   patterns,
+  detectedPatterns,
+  patternStatistics,
   pool,
   signalsHistory,
 } from "@workspace/db";
@@ -153,6 +155,10 @@ type CandlePattern = {
   profitFactor: number | null;
   occurrences: number;
   averageProfit: number | null;
+};
+type ProfessionalPattern = CandlePattern & {
+  confidence: number;
+  patternType: string;
 };
 type MarketStructure = {
   support: number | null;
@@ -458,6 +464,7 @@ function matchesCombination(
   feature: LatestFeature,
   combination: Combination,
   thresholds: FactorThresholds | undefined,
+  professionalPatternKeys: Set<string>,
 ) {
   if (!thresholds) return false;
   const percentage = (value: number | null, base: number | null) =>
@@ -560,9 +567,50 @@ function matchesCombination(
       case "volatility_low":
         return feature.historicalVolatility !== null && thresholds.volatilityLow !== null && feature.historicalVolatility <= thresholds.volatilityLow;
       default:
+        if (key.startsWith("pattern:")) {
+          return professionalPatternKeys.has(key.slice("pattern:".length));
+        }
         return false;
     }
   });
+}
+
+async function getCurrentProfessionalPatterns(
+  ticker: string,
+  timestamp: Date,
+): Promise<ProfessionalPattern[]> {
+  const result = await db
+    .select({
+      id: detectedPatterns.id,
+      name: detectedPatterns.patternType,
+      patternType: detectedPatterns.patternType,
+      direction: detectedPatterns.direction,
+      confidence: detectedPatterns.confidence,
+      successRate: patternStatistics.winRate,
+      profitFactor: patternStatistics.profitFactor,
+      occurrences: patternStatistics.occurrences,
+      averageProfit: patternStatistics.averageProfit,
+    })
+    .from(detectedPatterns)
+    .innerJoin(
+      patternStatistics,
+      and(
+        eq(patternStatistics.ticker, detectedPatterns.ticker),
+        eq(patternStatistics.timeframe, detectedPatterns.timeframe),
+        eq(patternStatistics.patternType, detectedPatterns.patternType),
+        eq(patternStatistics.direction, detectedPatterns.direction),
+      ),
+    )
+    .where(
+      and(
+        eq(detectedPatterns.ticker, ticker),
+        eq(detectedPatterns.timeframe, TIMEFRAME),
+        eq(detectedPatterns.endTimestamp, timestamp),
+        eq(patternStatistics.isSignificant, true),
+      ),
+    )
+    .orderBy(desc(patternStatistics.winRate));
+  return result as ProfessionalPattern[];
 }
 
 function numberOrNull(value: unknown) {
@@ -834,10 +882,13 @@ async function analyzeSignalWithContext(
     feature.close,
     context,
   );
-  const matched = combinations.filter((combination) =>
-    matchesCombination(feature, combination, thresholds),
+  const matchedPatterns = await getCurrentProfessionalPatterns(ticker, feature.timestamp);
+  const professionalPatternKeys = new Set(
+    matchedPatterns.map((pattern) => `${pattern.patternType}:${pattern.direction}`),
   );
-  const matchedPatterns: CandlePattern[] = [];
+  const matched = combinations.filter((combination) =>
+    matchesCombination(feature, combination, thresholds, professionalPatternKeys),
+  );
   if (!matched.length) {
     return {
       direction: "HOLD" as SignalDirection,

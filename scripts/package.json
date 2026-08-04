@@ -11,6 +11,7 @@
     "discover-patterns": "tsx ./src/research-discover.ts",
     "research-engine": "tsx ./src/research-discover.ts",
     "discover-candle-patterns": "tsx ./src/discover-candle-patterns.ts",
+    "discover-professional-patterns": "tsx ./src/discover-professional-patterns.ts",
     "refresh-levels-correlations": "tsx ./src/refresh-levels-correlations.ts",
     "research-refresh": "tsx ./src/research-refresh.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"

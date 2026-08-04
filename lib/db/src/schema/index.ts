@@ -417,6 +417,104 @@ export const patternOccurrences = pgTable(
   ],
 );
 
+export const detectedPatterns = pgTable(
+  "detected_patterns",
+  {
+    id: serial("id").primaryKey(),
+    ticker: varchar("ticker", { length: 32 }).notNull(),
+    timeframe: varchar("timeframe", { length: 16 }).notNull(),
+    startTimestamp: timestamp("start_timestamp", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    endTimestamp: timestamp("end_timestamp", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    patternType: varchar("pattern_type", { length: 96 }).notNull(),
+    direction: varchar("direction", { length: 16 }).notNull(),
+    confidence: doublePrecision("confidence").notNull(),
+    parameters: jsonb("parameters").$type<Record<string, unknown>>(),
+    detectedAt: timestamp("detected_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("detected_patterns_unique").on(
+      table.ticker,
+      table.timeframe,
+      table.startTimestamp,
+      table.endTimestamp,
+      table.patternType,
+      table.direction,
+    ),
+    index("detected_patterns_ticker_end_idx").on(
+      table.ticker,
+      table.timeframe,
+      table.endTimestamp,
+    ),
+    index("detected_patterns_type_idx").on(
+      table.patternType,
+      table.direction,
+      table.timeframe,
+    ),
+  ],
+);
+
+export const patternStatistics = pgTable(
+  "pattern_statistics",
+  {
+    id: serial("id").primaryKey(),
+    ticker: varchar("ticker", { length: 32 }).notNull(),
+    timeframe: varchar("timeframe", { length: 16 }).notNull(),
+    patternType: varchar("pattern_type", { length: 96 }).notNull(),
+    direction: varchar("direction", { length: 16 }).notNull(),
+    occurrences: integer("occurrences").notNull().default(0),
+    winRate: doublePrecision("win_rate"),
+    profitFactor: doublePrecision("profit_factor"),
+    expectancy: doublePrecision("expectancy"),
+    averageProfit: doublePrecision("average_profit"),
+    averageLoss: doublePrecision("average_loss"),
+    maxDrawdown: doublePrecision("max_drawdown"),
+    bestTakeProfit: doublePrecision("best_take_profit"),
+    bestStopLoss: doublePrecision("best_stop_loss"),
+    bestHoldingMinutes: integer("best_holding_minutes"),
+    pValue: doublePrecision("p_value"),
+    qValue: doublePrecision("q_value"),
+    confidenceLow: doublePrecision("confidence_low"),
+    confidenceHigh: doublePrecision("confidence_high"),
+    trainWinRate: doublePrecision("train_win_rate"),
+    testWinRate: doublePrecision("test_win_rate"),
+    trainExpectancy: doublePrecision("train_expectancy"),
+    testExpectancy: doublePrecision("test_expectancy"),
+    isSignificant: boolean("is_significant").notNull().default(false),
+    calculatedAt: timestamp("calculated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+  },
+  (table) => [
+    uniqueIndex("pattern_statistics_unique").on(
+      table.ticker,
+      table.timeframe,
+      table.patternType,
+      table.direction,
+    ),
+    index("pattern_statistics_lookup_idx").on(
+      table.ticker,
+      table.timeframe,
+      table.isSignificant,
+      table.winRate,
+    ),
+  ],
+);
+
 export const featureCombinations = pgTable(
   "feature_combinations",
   {
@@ -622,6 +720,8 @@ export type MarketObservation = typeof marketObservations.$inferSelect;
 export type MacroIndicator = typeof macroIndicators.$inferSelect;
 export type CentralBankEvent = typeof centralBankEvents.$inferSelect;
 export type PatternOccurrence = typeof patternOccurrences.$inferSelect;
+export type DetectedPattern = typeof detectedPatterns.$inferSelect;
+export type PatternStatistic = typeof patternStatistics.$inferSelect;
 export type FeatureCombination = typeof featureCombinations.$inferSelect;
 export type SignalHistory = typeof signalsHistory.$inferSelect;
 export type StrategyResult = typeof strategyResults.$inferSelect;
