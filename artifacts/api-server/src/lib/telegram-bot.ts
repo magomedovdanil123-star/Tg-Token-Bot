@@ -1,4 +1,6 @@
 import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   candles,
   db,
@@ -17,6 +19,17 @@ import { logger } from "./logger";
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
 const POLL_TIMEOUT_SECONDS = 25;
+const REFRESH_BUTTON = "🔄 Обновить исследование";
+const TELEGRAM_MENU = {
+  keyboard: [
+    [REFRESH_BUTTON],
+    ["🔥 Лучшие сигналы", "📋 Состав IMOEX"],
+    ["📈 Состояние рынка", "❓ Помощь"],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+let researchRefreshRunning = false;
 
 type TelegramUpdate = {
   update_id: number;
@@ -927,10 +940,73 @@ function helpText() {
     "/imoex — состав индекса IMOEX",
     "/market — состояние IMOEX",
     "/top — лучшие текущие сигналы",
+    "/refresh — полностью обновить данные и исследование",
     "/help — справка",
     "",
     "Данные: исторические свечи MOEX и рассчитанные признаки.",
+    `Для полного обновления нажмите «${REFRESH_BUTTON}».`,
   ].join("\n");
+}
+
+function isRefreshRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === REFRESH_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "/refresh" ||
+    normalizedText === "обновить исследование"
+  );
+}
+
+function startResearchRefresh() {
+  if (researchRefreshRunning) {
+    return {
+      started: false,
+      completion: Promise.resolve(
+        "⏳ Полное обновление уже выполняется. Дождитесь сообщения о завершении.",
+      ),
+    };
+  }
+
+  researchRefreshRunning = true;
+  const child = spawn(
+    "pnpm",
+    ["--filter", "@workspace/scripts", "run", "research-refresh"],
+    {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    logger.info({ output: chunk.toString().trim() }, "Research refresh output");
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    logger.warn({ output: chunk.toString().trim() }, "Research refresh error output");
+  });
+
+  const completion = once(child, "exit").then(([code, signal]) => {
+    researchRefreshRunning = false;
+    if (code === 0) {
+      return [
+        "✅ Полное обновление завершено.",
+        "",
+        "Обновлены свечи MOEX, признаки, исследовательское ядро, уровни и корреляции.",
+        "Новые результаты уже используются командами /signal и /top.",
+      ].join("\n");
+    }
+    return [
+      "❌ Полное обновление завершилось с ошибкой.",
+      `Код: ${code ?? "нет"}${signal ? `, сигнал: ${signal}` : ""}`,
+      "Подробности сохранены в журнале сервера.",
+    ].join("\n");
+  });
+
+  child.once("error", (error) => {
+    logger.error({ err: error }, "Research refresh process failed to start");
+  });
+
+  return { started: true, completion };
 }
 
 async function imoexText() {
@@ -1095,6 +1171,9 @@ async function handleMessage(chatId: number, text: string) {
   if (normalizedCommand === "/top") {
     return topText();
   }
+  if (isRefreshRequest(text)) {
+    return "Запуск обновления...";
+  }
   if (normalizedText === "акции" || normalizedText === "найденные") {
     return topText();
   }
@@ -1145,8 +1224,16 @@ function createTelegramClient(token: string) {
         },
         signal,
       ),
-    sendMessage: (chatId: number, text: string) =>
-      call("sendMessage", { chat_id: chatId, text }),
+    sendMessage: (
+      chatId: number,
+      text: string,
+      replyMarkup: Record<string, unknown> = TELEGRAM_MENU,
+    ) =>
+      call("sendMessage", {
+        chat_id: chatId,
+        text,
+        reply_markup: JSON.stringify(replyMarkup),
+      }),
   };
 }
 
@@ -1177,6 +1264,7 @@ export function startTelegramBot() {
           { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
           { command: "top", description: "Лучшие сигналы" },
+          { command: "refresh", description: "Обновить данные и исследование" },
           { command: "help", description: "Справка" },
         ]),
       );
@@ -1198,6 +1286,28 @@ export function startTelegramBot() {
             const command = message.text.trim().split(/\s+/, 1)[0];
             logger.info({ command }, "Telegram command received");
             try {
+              if (isRefreshRequest(message.text)) {
+                const refresh = startResearchRefresh();
+                await client.sendMessage(
+                  message.chat.id,
+                  refresh.started
+                    ? "🔄 Запустил полное обновление.\n\nЭто может занять длительное время. Я сообщу, когда всё завершится."
+                    : "⏳ Полное обновление уже выполняется. Второй запуск не требуется.",
+                );
+                if (refresh.started) {
+                  void refresh.completion
+                    .then((result) => client.sendMessage(message.chat.id, result))
+                    .catch(async (error) => {
+                      logger.error({ err: error }, "Research refresh completion notification failed");
+                      await client.sendMessage(
+                        message.chat.id,
+                        "❌ Не удалось отправить итог обновления. Проверьте журнал сервера.",
+                      );
+                    });
+                }
+                logger.info({ command }, "Telegram research refresh handled");
+                continue;
+              }
               const response = await handleMessage(message.chat.id, message.text);
               if (response) {
                 await client.sendMessage(message.chat.id, response);
