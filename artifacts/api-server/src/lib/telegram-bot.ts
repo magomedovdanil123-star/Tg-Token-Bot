@@ -102,6 +102,8 @@ let paperEvaluationRunning = false;
 let intradayScanRunning = false;
 let waveScanRunning = false;
 let smartMoneyScanRunning = false;
+let smartMoneyNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
+const smartMoneyChatIds = new Set<number>();
 let commodityScanRunning = false;
 let latestCommodityRefresh: Promise<void> | null = null;
 let commodityNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
@@ -138,6 +140,7 @@ async function loadMoneyTestSubscriptions() {
   for (const subscription of subscriptions) {
     if (Number.isSafeInteger(subscription.chatId)) {
       moneyTestChatIds.add(subscription.chatId);
+      smartMoneyChatIds.add(subscription.chatId);
     }
   }
   logger.info({ count: moneyTestChatIds.size }, "Money Test Telegram subscriptions loaded");
@@ -146,6 +149,7 @@ async function loadMoneyTestSubscriptions() {
 async function subscribeMoneyTestChat(chatId: number) {
   if (!Number.isSafeInteger(chatId)) return;
   moneyTestChatIds.add(chatId);
+  smartMoneyChatIds.add(chatId);
   await db
     .insert(telegramMoneyTestSubscriptions)
     .values({ chatId })
@@ -3660,6 +3664,7 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
   let recorded = 0;
   let duplicates = 0;
   let blocked = 0;
+  const recordedCandidates: SmartMoneyCandidate[] = [];
   for (const candidate of candidates) {
     const result = await recordPaperSignal({
       ticker: candidate.ticker,
@@ -3703,14 +3708,34 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
         chart: candidate.chart,
       },
     });
-    if (result === "recorded") recorded += 1;
+    if (result === "recorded") {
+      recorded += 1;
+      recordedCandidates.push(candidate);
+    }
     else if (result === "duplicate") duplicates += 1;
     else blocked += 1;
   }
-  return { recorded, duplicates, blocked };
+  return { recorded, duplicates, blocked, recordedCandidates };
 }
 
-async function smartMoneyText() {
+async function notifySmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
+  if (!smartMoneyNotifier || !smartMoneyChatIds.size) return;
+  for (const candidate of candidates) {
+    const message = [
+      "💰 НОВЫЙ СИГНАЛ · SMART MONEY",
+      "",
+      smartMoneyCandidateText(candidate, 1),
+    ].join("\n");
+    for (const chatId of smartMoneyChatIds) {
+      await smartMoneyNotifier(chatId, message);
+    }
+  }
+}
+
+async function smartMoneyText(chatId?: number) {
+  if (chatId !== undefined && Number.isSafeInteger(chatId)) {
+    smartMoneyChatIds.add(chatId);
+  }
   try {
     await ensureSmartMoneyDataFresh();
     await ensureSmartMoneyHigherTimeframes(false);
@@ -3885,6 +3910,7 @@ async function runSmartMoneyScanCycle() {
     await ensureSmartMoneyHigherTimeframes();
     const scan = await scanSmartMoney();
     const records = await recordSmartMoneyCandidates(scan.candidates);
+    await notifySmartMoneyCandidates(records.recordedCandidates);
     logger.info(
       {
         analyzed: scan.analyzed,
@@ -5048,7 +5074,7 @@ async function handleMessage(chatId: number, text: string) {
     return intradayText();
   }
   if (isSmartMoneyRequest(text)) {
-    return smartMoneyText();
+    return smartMoneyText(chatId);
   }
   if (isCommoditiesRequest(text)) {
     return commoditiesText(chatId);
@@ -5184,6 +5210,7 @@ export function startTelegramBot() {
   let offset = 0;
   const controller = new AbortController();
   const client = createTelegramClient(token);
+  smartMoneyNotifier = client.sendMessage;
   commodityNotifier = client.sendMessage;
   moneyTestNotifier = client.sendMessage;
   const intradayScanTimer = setInterval(() => {
@@ -5222,6 +5249,7 @@ export function startTelegramBot() {
     clearInterval(commodityScanTimer);
     clearInterval(moneyTestScanTimer);
     clearInterval(paperEvaluationTimer);
+    smartMoneyNotifier = null;
     commodityNotifier = null;
     moneyTestNotifier = null;
   };
