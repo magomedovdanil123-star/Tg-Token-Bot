@@ -27,7 +27,6 @@ import {
 import {
   scanSmartMoney,
   type SmartMoneyCandidate,
-  type SmartMoneyTickerDiagnostic,
 } from "./smart-money-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -2188,7 +2187,7 @@ function helpText() {
     "INVEST AI Research Engine",
     "",
     "Команды:",
-    "/analysis WUSH — подробная аналитика компании",
+    "/analysis WUSH — Smart Money по компании",
     "/intraday — внутридневной сканер IMOEX",
     "/smartmoney — Smart Money: SMC-сетапы с подтверждением",
     "/waves — волны Эллиотта, ABC и Fibonacci",
@@ -2964,7 +2963,7 @@ async function signalPicker() {
   }));
 
   return {
-    text: "🎯 Выберите акцию IMOEX для анализа:",
+    text: "🎯 Выберите акцию IMOEX для Smart Money:",
     replyMarkup: {
       inline_keyboard: Array.from(
         { length: Math.ceil(buttons.length / 2) },
@@ -2995,7 +2994,7 @@ async function companyAnalysisPicker() {
   }));
   return {
     text: [
-      "🔎 Выберите компанию для подробной аналитики.",
+      "🔎 Выберите компанию для Smart Money-проверки.",
       "",
       "Можно также отправить команду /analysis ТИКЕР или название компании.",
       "Например: /analysis WUSH или /analysis ВУШ",
@@ -3335,7 +3334,6 @@ function refreshCompanyAnalysisData(ticker: string) {
   const refresh = (async () => {
     await runImport("1m", 2);
     await runImport("1h", 60);
-    await runImport("1d", 730);
   })().finally(() => {
     companyAnalysisRefreshes.delete(ticker);
   });
@@ -3709,94 +3707,24 @@ function companyTimeframeText(analysis: CompanyTimeframeAnalysis) {
   ].join("\n");
 }
 
-function smartMoneyDiagnosticText(
-  candidate: SmartMoneyCandidate | undefined,
-  diagnostic: SmartMoneyTickerDiagnostic | undefined,
-) {
-  if (candidate) {
-    return [
-      `✅ Smart Money: ${directionLabel(candidate.direction)} · рейтинг ${candidate.score}/100`,
-      `Вход: ${formatNumber(candidate.entryPrice)} · SL: ${formatNumber(candidate.stopPrice)} · TP2: ${formatNumber(candidate.takeProfit2)}`,
-      `Net R:R: 1:${formatNumber(candidate.netRewardRisk, 2)} · BOS: ${candidate.structure.bos ?? "—"} · CHoCH: ${candidate.structure.choch ?? "—"}`,
-      `Накопление: ${candidate.accumulation.strength} · объём: ${candidate.volumeConfirmed ? "подтверждён" : "нет"} · HTF: ${candidate.higherTimeframeAgreement.join(", ") || "нет"}`,
-      `Order Block: ${candidate.orderBlock ?? "не найден"} · FVG: ${candidate.fairValueGap ?? "не найден"}`,
-      "Сетап прошёл текущие фильтры Smart Money и допущен к paper-логике.",
-    ].join("\n");
-  }
-  return [
-    "⛔ Smart Money: готового сигнала сейчас нет.",
-    `Рейтинг: ${diagnostic?.score === null || diagnostic?.score === undefined ? "—" : `${diagnostic.score}/100`} · порог: ${diagnostic?.threshold ?? "—"}`,
-    "Причины проверки:",
-    ...(diagnostic?.reasons.length ? diagnostic.reasons.map((reason) => `• ${reason}`) : ["• недостаточно данных для диагностики"]),
-  ].join("\n");
-}
-
 async function companyAnalysisText(input: string) {
   const resolved = await resolveCompanyTicker(input);
-  if (!resolved) {
-    if (/(sportmaster|спортмастер|sportmoney|спортмани)/i.test(input)) {
-      return [
-        "🔎 Sportmaster / Sportmoney",
-        "",
-        "Публичная акция этой компании не найдена в MOEX ISS.",
-        "Поэтому у неё нет доступных биржевых свечей 1H/1D/1W/1M для технического анализа.",
-        "Я не буду придумывать сигнал по данным, которых нет.",
-      ].join("\n");
-    }
-    return [
-      `🔎 Компания не найдена: ${input}`,
-      "",
-      "Укажите тикер акции MOEX, например /analysis WUSH.",
-      "Если компания не имеет публичной акции на MOEX, технический анализ по свечам невозможен.",
-    ].join("\n");
-  }
-  const { ticker, shortName } = resolved;
+  if (!resolved) return "";
+  const { ticker } = resolved;
   try {
     await refreshCompanyAnalysisData(ticker);
-    const hourly = closedCompanyRows(await getCompanyCandles(ticker, "1h", 2500), "1h");
-    const daily = closedCompanyRows(await getCompanyCandles(ticker, "1d", 900), "1d");
-    const weekly = aggregateCalendarBars(daily, "week").filter((row) => row.timestamp.getTime() < currentWeekStart());
-    const monthly = aggregateCalendarBars(daily, "month").filter((row) => {
-      const now = new Date();
-      return row.timestamp.getUTCFullYear() < now.getUTCFullYear() ||
-        (row.timestamp.getUTCFullYear() === now.getUTCFullYear() &&
-          row.timestamp.getUTCMonth() < now.getUTCMonth());
-    });
-    const analyses = [
-      companyTimeframeAnalysis("1H", hourly),
-      companyTimeframeAnalysis("1D", daily),
-      companyTimeframeAnalysis("1W", weekly),
-      companyTimeframeAnalysis("1M", monthly),
-    ];
+    await ensureSmartMoneyHigherTimeframes();
     const smartScan = await scanSmartMoney(ticker);
     const candidate = smartScan.candidates.find((item) => item.ticker === ticker);
-    const diagnostic = smartScan.diagnostics.find((item) => item.ticker === ticker);
-    const technicalDirection = analyses.find((item) => item.label === "1D")?.direction ?? "HOLD";
-    return [
-      `🔎 АНАЛИТИКА КОМПАНИИ · ${ticker}`,
-      shortName ? `${shortName}` : "",
-      "",
-      "Текущий технический срез по закрытым свечам:",
-      ...analyses.flatMap((analysis) => [companyTimeframeText(analysis), ""]),
-      `Сводное направление по 1D: ${directionLabel(technicalDirection)}`,
-      "",
-      smartMoneyDiagnosticText(candidate, diagnostic),
-      "",
-      `Проверка SMC: 1m execution · сетап 15m · HTF 1H/4H/1D · дополнительно показаны 1W/1M.`,
-      "Недельный и месячный контекст не добавлен как новый блокирующий фильтр, чтобы не менять утверждённую логику Smart Money.",
-      "Все расчёты выполнены по сохранённым свечам MOEX; незакрытые бары исключены.",
-      "",
-      "Режим: PAPER TRADING — реальные сделки не совершаются.",
-      "Это исследовательская аналитика, не финансовая рекомендация.",
-    ].filter(Boolean).join("\n");
+    if (!candidate) {
+      logger.info({ ticker }, "Company Smart Money has no entry");
+      return "";
+    }
+    await recordSmartMoneyCandidates([candidate]);
+    return smartMoneyCandidateText(candidate, 1);
   } catch (error) {
     logger.error({ err: error, ticker }, "Company analysis failed");
-    return [
-      `🔎 Аналитика ${ticker}`,
-      "",
-      "Не удалось обновить данные или собрать отчёт.",
-      "Сигнал не формирую, чтобы не использовать неполные свечи.",
-    ].join("\n");
+    return "";
   }
 }
 
@@ -4218,7 +4146,7 @@ export function startTelegramBot() {
       await client.deleteWebhook();
       await client.setMyCommands(
         JSON.stringify([
-          { command: "analysis", description: "Аналитика компании по таймфреймам" },
+          { command: "analysis", description: "Smart Money по выбранной акции" },
           { command: "signal", description: "Сигнал по тикеру" },
           { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
@@ -4259,7 +4187,7 @@ export function startTelegramBot() {
                   callbackData.startsWith("signal:")
                     ? "Анализирую акцию..."
                     : callbackData.startsWith("analysis:")
-                      ? "Собираю аналитику по закрытым свечам..."
+                      ? "Проверяю Smart Money по акции..."
                     : callbackData.startsWith("wave:")
                       ? "Сохраняю результат волнового сигнала..."
                     : undefined,
@@ -4279,8 +4207,12 @@ export function startTelegramBot() {
                     .toUpperCase()
                     .replace(/[^A-Z0-9_]/g, "");
                   const response = await companyAnalysisText(ticker);
-                  await client.sendMessage(callbackChatId, response);
-                  logger.info({ ticker }, "Telegram company analysis sent");
+                  if (response) {
+                    await client.sendMessage(callbackChatId, response);
+                    logger.info({ ticker }, "Telegram company Smart Money signal sent");
+                  } else {
+                    logger.info({ ticker }, "Telegram company Smart Money has no entry");
+                  }
                 }
                 if (callbackChatId && callbackData.startsWith("wave:")) {
                   const [, result, rawId] = callbackData.split(":");

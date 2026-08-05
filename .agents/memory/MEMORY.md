@@ -9,3 +9,4 @@
 - [Wave causal validation](wave-causal-validation.md) — confirmed pivots must be accumulated online; full-series pivot replacement creates look-ahead and falsely inflates wave win rate.
 - [Smart Money causality](smart-money-causality.md) — exclude open aggregate bars, persist execution timeframe, and refresh stale HTF data before SMC scans.
 - [Smart Money filtering](smart-money-filtering.md) — keep SMC filters orthogonal and explainable; tune thresholds from rejection stats and out-of-sample results.
+- [Company analysis output](company-analysis-output.md) — company selection must return the same Smart Money candidate format; send nothing when no entry passes.
