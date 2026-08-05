@@ -13,6 +13,7 @@ const MAX_AGE_MINUTES: Record<WaveTimeframe, number> = { "30m": 150, "1h": 270 }
 const MAX_BARS_PER_SERIES = 2400;
 const BACKTEST_START_BARS = 120;
 const COOLDOWN_BARS: Record<WaveTimeframe, number> = { "30m": 8, "1h": 6 };
+const CURRENT_SIGNAL_BARS: Record<WaveTimeframe, number> = { "30m": 4, "1h": 3 };
 
 type Candle = {
   ticker: string;
@@ -70,7 +71,7 @@ export type ElliottCandidate = {
   timeframe: WaveTimeframe;
   timestamp: Date;
   direction: Direction;
-  setupType: "elliott" | "breakout_retest";
+  setupType: "elliott";
   scenario: string;
   entryPrice: number;
   targetPrice: number;
@@ -80,8 +81,6 @@ export type ElliottCandidate = {
   invalidationPrice: number;
   confidence: number;
   fibonacci: FibonacciInfo | null;
-  levelPrice: number | null;
-  levelType: "support" | "resistance" | null;
   relativeVolume: number | null;
   reasons: string[];
   historical: WaveHistoricalStats;
@@ -91,6 +90,7 @@ export type ElliottScanResult = {
   analyzed: number;
   series: number;
   freshSeries: number;
+  totalCandidates: number;
   candidates: ElliottCandidate[];
   unavailable: string[];
   generatedAt: Date;
@@ -251,19 +251,6 @@ function relativeVolume(rows: Candle[], index: number) {
   return baseline && baseline > 0 ? rows[index].volume / baseline : null;
 }
 
-function nearbyLevel(rows: Candle[], index: number, direction: Direction) {
-  const window = rows.slice(Math.max(0, index - 50), index);
-  if (!window.length) return { price: null, type: null as "support" | "resistance" | null };
-  if (direction === "BUY") {
-    const support = Math.max(...window.map((row) => row.low).filter((value) => value < rows[index].close));
-    return Number.isFinite(support) ? { price: support, type: "support" as const } : { price: null, type: null };
-  }
-  const resistance = Math.min(...window.map((row) => row.high).filter((value) => value > rows[index].close));
-  return Number.isFinite(resistance)
-    ? { price: resistance, type: "resistance" as const }
-    : { price: null, type: null };
-}
-
 function validTrade(direction: Direction, entry: number, target: number, stop: number) {
   const targetPercent = Math.abs(positivePct(direction, entry, target));
   const stopPercent = Math.abs(positivePct(direction, entry, stop));
@@ -306,7 +293,7 @@ function impulseCandidates(
   const volume = relativeVolume(rows, index);
 
   const addBull = (
-    setupType: string,
+    _setupType: string,
     scenario: string,
     p0: Pivot,
     p1: Pivot,
@@ -315,7 +302,6 @@ function impulseCandidates(
     target: number,
     invalidation: number,
     fib: FibonacciInfo,
-    level: ReturnType<typeof nearbyLevel>,
   ) => {
     if (p0.kind !== "low" || p1.kind !== "high" || p2.kind !== "low") return;
     if (p2.price <= p0.price || current.close <= entryBreak * 1.0003) return;
@@ -326,22 +312,19 @@ function impulseCandidates(
       `Fibonacci: ${fib.retracementZone}`,
     ];
     if (volume !== null && volume >= 1.2) reasons.push(`объём пробоя выше среднего (${volume.toFixed(2)}x)`);
-    if (level.price !== null) reasons.push(`рядом поддержка ${level.price.toFixed(2)}`);
     const candidate = makeCandidate({
       ticker: rows[index].ticker,
       timeframe,
       timestamp: current.timestamp,
       direction: "BUY",
-      setupType: setupType === "breakout_retest" ? "breakout_retest" : "elliott",
+      setupType: "elliott",
       scenario,
       entryPrice: current.close,
       targetPrice: target,
       stopPrice: stop,
       invalidationPrice: invalidation,
-      confidence: 55 + (fib.retracement !== null && fib.retracement >= 0.382 && fib.retracement <= 0.786 ? 12 : 0) + (volume !== null && volume >= 1.2 ? 10 : 0) + (level.price !== null ? 6 : 0),
+      confidence: 55 + (fib.retracement !== null && fib.retracement >= 0.382 && fib.retracement <= 0.786 ? 12 : 0) + (volume !== null && volume >= 1.2 ? 10 : 0),
       fibonacci: fib,
-      levelPrice: level.price,
-      levelType: level.type,
       relativeVolume: volume,
       reasons,
     });
@@ -357,7 +340,6 @@ function impulseCandidates(
     target: number,
     invalidation: number,
     fib: FibonacciInfo,
-    level: ReturnType<typeof nearbyLevel>,
   ) => {
     if (p0.kind !== "high" || p1.kind !== "low" || p2.kind !== "high") return;
     if (p2.price >= p0.price || current.close >= entryBreak * 0.9997) return;
@@ -368,7 +350,6 @@ function impulseCandidates(
       `Fibonacci: ${fib.retracementZone}`,
     ];
     if (volume !== null && volume >= 1.2) reasons.push(`объём пробоя выше среднего (${volume.toFixed(2)}x)`);
-    if (level.price !== null) reasons.push(`рядом сопротивление ${level.price.toFixed(2)}`);
     const candidate = makeCandidate({
       ticker: rows[index].ticker,
       timeframe,
@@ -380,10 +361,8 @@ function impulseCandidates(
       targetPrice: target,
       stopPrice: stop,
       invalidationPrice: invalidation,
-      confidence: 55 + (fib.retracement !== null && fib.retracement >= 0.382 && fib.retracement <= 0.786 ? 12 : 0) + (volume !== null && volume >= 1.2 ? 10 : 0) + (level.price !== null ? 6 : 0),
+      confidence: 55 + (fib.retracement !== null && fib.retracement >= 0.382 && fib.retracement <= 0.786 ? 12 : 0) + (volume !== null && volume >= 1.2 ? 10 : 0),
       fibonacci: fib,
-      levelPrice: level.price,
-      levelType: level.type,
       relativeVolume: volume,
       reasons,
     });
@@ -407,7 +386,6 @@ function impulseCandidates(
           target,
           p0.price,
           fibonacci(p0.price, p1.price, p2.price, "BUY", target),
-          nearbyLevel(rows, index, "BUY"),
         );
       }
     }
@@ -425,7 +403,6 @@ function impulseCandidates(
           target,
           p0.price,
           fibonacci(p0.price, p1.price, p2.price, "SELL", target),
-          nearbyLevel(rows, index, "SELL"),
         );
       }
     }
@@ -451,7 +428,6 @@ function impulseCandidates(
         target,
         p1.price,
         fibonacci(p2.price, p3.price, p4.price, "BUY", target),
-        nearbyLevel(rows, index, "BUY"),
       );
     }
     if (
@@ -471,7 +447,6 @@ function impulseCandidates(
         target,
         p1.price,
         fibonacci(p3.price, p2.price, p4.price, "SELL", target),
-        nearbyLevel(rows, index, "SELL"),
       );
     }
   }
@@ -498,9 +473,6 @@ function impulseCandidates(
         invalidationPrice: p3.price,
         confidence: 58 + (volume !== null && volume >= 1.2 ? 10 : 0),
         fibonacci: fib,
-        ...nearbyLevel(rows, index, "BUY"),
-        levelPrice: nearbyLevel(rows, index, "BUY").price,
-        levelType: nearbyLevel(rows, index, "BUY").type,
         relativeVolume: volume,
         reasons: ["структура ABC с более низким минимумом", "пробой вершины волны B", `Fibonacci: ${fib.retracementZone}`],
       });
@@ -513,7 +485,6 @@ function impulseCandidates(
       const a = p1.price - p0.price;
       const target = p3.price - a;
       const fib = fibonacci(p0.price, p1.price, p3.price, "SELL", target);
-      const level = nearbyLevel(rows, index, "SELL");
       const candidate = makeCandidate({
         ticker: rows[index].ticker,
         timeframe,
@@ -527,8 +498,6 @@ function impulseCandidates(
         invalidationPrice: p3.price,
         confidence: 58 + (volume !== null && volume >= 1.2 ? 10 : 0),
         fibonacci: fib,
-        levelPrice: level.price,
-        levelType: level.type,
         relativeVolume: volume,
         reasons: ["структура ABC с более высоким максимумом", "пробой основания волны B", `Fibonacci: ${fib.retracementZone}`],
       });
@@ -538,87 +507,8 @@ function impulseCandidates(
   return output;
 }
 
-function breakoutRetestCandidate(rows: Candle[], index: number, timeframe: WaveTimeframe): RawCandidate | null {
-  if (index < 35) return null;
-  const current = rows[index];
-  const searchStart = Math.max(30, index - 10);
-  for (let breakoutIndex = index - 8; breakoutIndex <= index - 2; breakoutIndex += 1) {
-    const prior = rows.slice(Math.max(0, breakoutIndex - 30), breakoutIndex);
-    if (prior.length < 20) continue;
-    const resistance = Math.max(...prior.map((row) => row.high));
-    const support = Math.min(...prior.map((row) => row.low));
-    const breakout = rows[breakoutIndex];
-    const vol = relativeVolume(rows, breakoutIndex);
-    if (
-      breakout.close > resistance * 1.001 &&
-      breakoutIndex >= searchStart &&
-      rows.slice(breakoutIndex + 1, index).some((row) => row.low <= resistance * 1.004 && row.close >= resistance)
-    ) {
-      const retestIndex = rows.slice(breakoutIndex + 1, index).findIndex((row) => row.low <= resistance * 1.004 && row.close >= resistance);
-      const retest = rows[breakoutIndex + 1 + retestIndex];
-      if (retest && current.close > retest.high * 1.0003) {
-        const target = current.close + Math.max((current.close - resistance) * 2, current.close * 0.005);
-        const stop = resistance * 0.995;
-        const fib = fibonacci(resistance, breakout.close, retest.close, "BUY", target);
-        return makeCandidate({
-          ticker: current.ticker,
-          timeframe,
-          timestamp: current.timestamp,
-          direction: "BUY",
-          setupType: "breakout_retest",
-          scenario: "пробой сопротивления и подтверждённый ретест",
-          entryPrice: current.close,
-          targetPrice: target,
-          stopPrice: stop,
-          invalidationPrice: resistance,
-          confidence: 62 + (vol !== null && vol >= 1.2 ? 12 : 0),
-          fibonacci: fib,
-          levelPrice: resistance,
-          levelType: "resistance",
-          relativeVolume: vol,
-          reasons: ["закрытие выше сопротивления", "ретест уровня сверху", "продолжение после ретеста", ...(vol !== null && vol >= 1.2 ? [`объём пробоя ${vol.toFixed(2)}x`] : [])],
-        });
-      }
-    }
-    if (
-      breakout.close < support * 0.999 &&
-      breakoutIndex >= searchStart &&
-      rows.slice(breakoutIndex + 1, index).some((row) => row.high >= support * 0.996 && row.close <= support)
-    ) {
-      const retestIndex = rows.slice(breakoutIndex + 1, index).findIndex((row) => row.high >= support * 0.996 && row.close <= support);
-      const retest = rows[breakoutIndex + 1 + retestIndex];
-      if (retest && current.close < retest.low * 0.9997) {
-        const target = current.close - Math.max((support - current.close) * 2, current.close * 0.005);
-        const stop = support * 1.005;
-        const fib = fibonacci(support, breakout.close, retest.close, "SELL", target);
-        return makeCandidate({
-          ticker: current.ticker,
-          timeframe,
-          timestamp: current.timestamp,
-          direction: "SELL",
-          setupType: "breakout_retest",
-          scenario: "пробой поддержки и подтверждённый ретест",
-          entryPrice: current.close,
-          targetPrice: target,
-          stopPrice: stop,
-          invalidationPrice: support,
-          confidence: 62 + (vol !== null && vol >= 1.2 ? 12 : 0),
-          fibonacci: fib,
-          levelPrice: support,
-          levelType: "support",
-          relativeVolume: vol,
-          reasons: ["закрытие ниже поддержки", "ретест уровня снизу", "продолжение после ретеста", ...(vol !== null && vol >= 1.2 ? [`объём пробоя ${vol.toFixed(2)}x`] : [])],
-        });
-      }
-    }
-  }
-  return null;
-}
-
 function detectAt(rows: Candle[], index: number, timeframe: WaveTimeframe, pivots: Pivot[]) {
   const candidates = impulseCandidates(rows, index, timeframe, pivots);
-  const breakout = breakoutRetestCandidate(rows, index, timeframe);
-  if (breakout) candidates.push(breakout);
   const seen = new Set<string>();
   return candidates.filter((candidate) => {
     const key = `${candidate.setupType}:${candidate.direction}:${candidate.scenario}`;
@@ -700,12 +590,12 @@ function makeStats(accumulator: StatAccumulator | undefined): WaveHistoricalStat
     averageProfit: average(positive),
     averageLoss: average(negative),
     maxDrawdown,
-    statisticallyValid: results.length >= 20 && test.length >= 8 && (average(testNet) ?? -Infinity) > 0 && (testWins / Math.max(1, test.length)) >= 0.5,
+    statisticallyValid: results.length > 0 && (average(net) ?? -Infinity) > 0,
   };
 }
 
 function statsKey(candidate: RawCandidate) {
-  return `${candidate.ticker}:${candidate.timeframe}:${candidate.setupType}:${candidate.direction}:${candidate.scenario}`;
+  return `${candidate.timeframe}:${candidate.setupType}:${candidate.direction}:${candidate.scenario}`;
 }
 
 function attachStats(candidate: RawCandidate, stats: Map<string, StatAccumulator>) {
@@ -796,21 +686,35 @@ export async function scanElliottWaveStrategies(): Promise<ElliottScanResult> {
       }
     }
     if (fresh) {
-      const detected = detectAt(item.candles, item.candles.length - 1, item.timeframe, pivots);
-      currentCandidates.push(...detected);
+      const firstCurrentIndex = Math.max(
+        BACKTEST_START_BARS,
+        item.candles.length - CURRENT_SIGNAL_BARS[item.timeframe],
+      );
+      for (let currentIndex = firstCurrentIndex; currentIndex < item.candles.length; currentIndex += 1) {
+        const detected = detectAt(item.candles, currentIndex, item.timeframe, pivots);
+        currentCandidates.push(...detected);
+      }
     }
   }
 
-  const candidates = currentCandidates
+  const uniqueCandidates = new Map<string, RawCandidate>();
+  for (const candidate of currentCandidates) {
+    const key = `${candidate.ticker}:${candidate.timeframe}:${candidate.direction}:${candidate.scenario}`;
+    const previous = uniqueCandidates.get(key);
+    if (!previous || candidate.confidence > previous.confidence || candidate.timestamp > previous.timestamp) {
+      uniqueCandidates.set(key, candidate);
+    }
+  }
+  const candidates = [...uniqueCandidates.values()]
     .map((candidate) => attachStats(candidate, stats))
-    .filter((candidate) => candidate.historical.statisticallyValid)
     .sort((a, b) => b.confidence - a.confidence)
-    .slice(0, 12);
+    .slice(0, 5);
 
   return {
     analyzed,
     series: series.length,
     freshSeries,
+    totalCandidates: uniqueCandidates.size,
     candidates,
     unavailable,
     generatedAt: new Date(),

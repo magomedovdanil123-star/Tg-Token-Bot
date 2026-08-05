@@ -4,3 +4,4 @@
 - [Research engine policy](research-engine-policy.md) — active Telegram signals must come only from statistically validated auto-engine combinations, never legacy hardcoded strategies.
 - [Pattern discovery scale](pattern-discovery-scale.md) — structural pattern detectors need cooldown/sampling and per-ticker checkpointed statistics to avoid event explosions.
 - [Paper signal evaluation](paper-signal-evaluation.md) — paper results include round-trip costs and resolve same-candle TP/SL ambiguity conservatively as a loss.
+- [Wave signal display](wave-signal-display.md) — wave UI should show current structures directly, report the total, and display up to five highest-confidence signals without a minimum analogue count.

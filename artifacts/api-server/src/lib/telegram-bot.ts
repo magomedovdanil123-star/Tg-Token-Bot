@@ -35,6 +35,7 @@ const ANALOG_BUTTON = "📊 Аналогичные рыночные ситуац
 const ACCURACY_BUTTON = "📊 Точность сигналов";
 const INTRADAY_BUTTON = "⚡ Внутри дня";
 const WAVES_BUTTON = "🌊 Волновой анализ";
+const WAVE_STATS_BUTTON = "📒 Статистика волн";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
@@ -70,6 +71,7 @@ const TELEGRAM_MENU = {
     [ANALOG_BUTTON],
     [INTRADAY_BUTTON],
     [WAVES_BUTTON],
+    [WAVE_STATS_BUTTON],
     [ACCURACY_BUTTON],
     ["📈 Состояние рынка", "❓ Помощь"],
   ],
@@ -85,6 +87,12 @@ let intradayScanRunning = false;
 let waveScanRunning = false;
 
 type PaperRecordResult = "recorded" | "duplicate" | "risk_limit";
+type TelegramMessage = {
+  text: string;
+  replyMarkup?: Record<string, unknown>;
+};
+
+type TelegramReply = string | TelegramMessage;
 
 type TelegramUpdate = {
   update_id: number;
@@ -377,6 +385,7 @@ async function recordPaperSignal(input: {
   source: "telegram" | "top" | "intraday" | "wave";
   timeframe?: string;
   metadata?: Record<string, unknown>;
+  bypassRiskLimits?: boolean;
 }): Promise<PaperRecordResult> {
   if (input.direction === "HOLD") return "risk_limit";
   const timeframe = input.timeframe ?? TIMEFRAME;
@@ -395,7 +404,9 @@ async function recordPaperSignal(input: {
     .limit(1);
   if (existing.length) return "duplicate";
 
-  const limits = await db.execute(sql`
+  const limits = input.bypassRiskLimits
+    ? null
+    : await db.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE outcome IS NULL)::int AS active_count,
       COALESCE(SUM(outcome_percent) FILTER (
@@ -405,14 +416,16 @@ async function recordPaperSignal(input: {
     FROM signals_history
     WHERE metadata ->> 'paperTrading' = 'true'
   `);
-  const limitRow = (limits.rows[0] ?? {}) as Record<string, unknown>;
-  const activeCount = Number(limitRow.active_count) || 0;
-  const dailyResult = Number(limitRow.daily_result) || 0;
-  if (
-    activeCount >= PAPER_MAX_ACTIVE_SIGNALS ||
-    dailyResult <= -PAPER_MAX_DAILY_LOSS_PERCENT
-  ) {
-    return "risk_limit";
+  if (limits) {
+    const limitRow = (limits.rows[0] ?? {}) as Record<string, unknown>;
+    const activeCount = Number(limitRow.active_count) || 0;
+    const dailyResult = Number(limitRow.daily_result) || 0;
+    if (
+      activeCount >= PAPER_MAX_ACTIVE_SIGNALS ||
+      dailyResult <= -PAPER_MAX_DAILY_LOSS_PERCENT
+    ) {
+      return "risk_limit";
+    }
   }
 
   await db.insert(signalsHistory).values({
@@ -452,6 +465,7 @@ async function evaluatePaperSignals() {
     FROM signals_history
     WHERE outcome IS NULL
       AND metadata ->> 'paperTrading' = 'true'
+      AND COALESCE(metadata ->> 'source', '') <> 'wave'
     ORDER BY id
     LIMIT 500
   `);
@@ -589,6 +603,102 @@ async function evaluatePaperSignals() {
       `);
     }
   }
+}
+
+async function manualWaveOutcome(
+  signalId: number,
+  outcomePercent: number,
+  label: "win" | "loss" | "custom",
+) {
+  if (!Number.isInteger(signalId) || !Number.isFinite(outcomePercent)) {
+    return "Укажите корректные данные: /wave_result ID процент";
+  }
+  const result = await db.execute(sql`
+    UPDATE signals_history
+    SET outcome = ${outcomePercent >= 0 ? "MANUAL_WIN" : "MANUAL_LOSS"},
+        outcome_percent = ${outcomePercent},
+        outcome_at = NOW(),
+        metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({
+          manualResult: true,
+          manualResultLabel: label,
+        })}::jsonb
+    WHERE id = ${signalId}
+      AND outcome IS NULL
+      AND metadata ->> 'source' = 'wave'
+    RETURNING ticker, timeframe, direction, outcome_percent AS "outcomePercent"
+  `);
+  const row = (result.rows[0] ?? null) as
+    | { ticker?: string; timeframe?: string; direction?: string; outcomePercent?: number }
+    | null;
+  if (!row) {
+    return `Волновой сигнал #${signalId} не найден или уже получил результат.`;
+  }
+  return [
+    `✅ Результат волнового сигнала #${signalId} сохранён.`,
+    `${row.ticker} · ${row.timeframe} · ${row.direction === "BUY" ? "LONG" : "SHORT"}`,
+    `Фактический результат: ${outcomePercent >= 0 ? "+" : ""}${formatNumber(outcomePercent, 2)}%`,
+    "Он учтён в статистике волнового анализа.",
+  ].join("\n");
+}
+
+async function quickWaveOutcome(signalId: number, win: boolean) {
+  const result = await db.execute(sql`
+    SELECT entry_price AS "entryPrice",
+           target_price AS "targetPrice",
+           stop_price AS "stopPrice",
+           direction,
+           metadata
+    FROM signals_history
+    WHERE id = ${signalId}
+      AND outcome IS NULL
+      AND metadata ->> 'source' = 'wave'
+    LIMIT 1
+  `);
+  const row = (result.rows[0] ?? null) as Record<string, unknown> | null;
+  if (!row) return `Волновой сигнал #${signalId} не найден или уже получил результат.`;
+  const entry = Number(row.entryPrice);
+  const exit = Number(win ? row.targetPrice : row.stopPrice);
+  const direction = String(row.direction);
+  const gross =
+    direction === "BUY"
+      ? ((exit - entry) / entry) * 100
+      : ((entry - exit) / entry) * 100;
+  const net = gross - PAPER_TRANSACTION_COST_PERCENT;
+  return manualWaveOutcome(signalId, net, win ? "win" : "loss");
+}
+
+async function waveStatsText() {
+  const result = await db.execute(sql`
+    SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE outcome IS NULL)::int AS pending,
+      COUNT(*) FILTER (WHERE outcome = 'MANUAL_WIN')::int AS wins,
+      COUNT(*) FILTER (WHERE outcome = 'MANUAL_LOSS')::int AS losses,
+      AVG(outcome_percent) FILTER (WHERE outcome IS NOT NULL) AS average_percent,
+      COALESCE(SUM(outcome_percent) FILTER (WHERE outcome IS NOT NULL), 0) AS net_percent
+    FROM signals_history
+    WHERE metadata ->> 'source' = 'wave'
+  `);
+  const row = (result.rows[0] ?? {}) as Record<string, unknown>;
+  const total = Number(row.total) || 0;
+  const pending = Number(row.pending) || 0;
+  const wins = Number(row.wins) || 0;
+  const losses = Number(row.losses) || 0;
+  const closed = wins + losses;
+  const winRate = closed ? (wins / closed) * 100 : null;
+  return [
+    "📒 СТАТИСТИКА ВОЛНОВЫХ СИГНАЛОВ",
+    "",
+    `Всего записано: ${total}`,
+    `Ожидают ручной оценки: ${pending}`,
+    `Положительных: ${wins} · отрицательных: ${losses}`,
+    `Win rate: ${formatNumber(winRate, 1)}%`,
+    `Средний результат: ${formatNumber(Number(row.average_percent), 2)}%`,
+    `Накопленный результат: ${formatNumber(Number(row.net_percent), 2)}%`,
+    "",
+    "Кнопки «сработал/не сработал» записывают paper-результат после издержек.",
+    "Для точного результата: /wave_result ID процент, например /wave_result 123 1.25",
+  ].join("\n");
 }
 
 async function accuracyText() {
@@ -2061,7 +2171,9 @@ function helpText() {
     "",
     "Команды:",
     "/intraday — внутридневной сканер IMOEX",
-    "/waves — волны Эллиотта, Fibonacci и пробои/ретесты",
+    "/waves — волны Эллиотта, ABC и Fibonacci",
+    "/wave_stats — ручная статистика волновых сигналов",
+    "/wave_result ID результат — записать результат сигнала",
     "/signal SBER — сигнал по тикеру",
     "/imoex — состав индекса IMOEX",
     "/market — состояние IMOEX",
@@ -2092,6 +2204,15 @@ function isWavesRequest(text: string) {
     normalizedText === "волновой анализ" ||
     normalizedText === "волны эллиотта" ||
     normalizedText === "/waves"
+  );
+}
+
+function isWaveStatsRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === WAVE_STATS_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "статистика волн" ||
+    normalizedText === "/wave_stats"
   );
 }
 
@@ -2130,7 +2251,11 @@ function waveHorizonMinutes(timeframe: string) {
   return timeframe === "30m" ? 720 : 1440;
 }
 
-function waveCandidateText(candidate: ElliottCandidate, index: number) {
+function waveCandidateText(
+  candidate: ElliottCandidate,
+  index: number,
+  signalId: number | null,
+) {
   const isLong = candidate.direction === "BUY";
   const fib = candidate.fibonacci;
   const historical = candidate.historical;
@@ -2156,23 +2281,25 @@ function waveCandidateText(candidate: ElliottCandidate, index: number) {
     fib
       ? `Fibonacci: ${fib.retracementZone} · retracement ${fib.retracement === null ? "—" : `${formatNumber(fib.retracement * 100, 1)}%`} · extension ${fib.extension === null ? "—" : formatNumber(fib.extension, 2)}x`
       : "Fibonacci: нет подтверждённой пары anchors",
-    candidate.levelPrice === null
-      ? "Ближайший уровень: не найден"
-      : `Ближайший уровень: ${candidate.levelType === "support" ? "поддержка" : "сопротивление"} ${formatNumber(candidate.levelPrice)}`,
     candidate.relativeVolume === null
       ? "Относительный объём: —"
       : `Относительный объём: ${formatNumber(candidate.relativeVolume, 2)}x`,
     "Подтверждения:",
     ...candidate.reasons.map((reason) => `• ${reason}`),
     `Paper-горизонт: ${waveHorizonMinutes(candidate.timeframe)} минут`,
+    signalId
+      ? `ID сигнала: ${signalId} · отметьте результат кнопкой или /wave_result ${signalId} 1.25`
+      : "Сигнал не записан",
     "Режим: PAPER TRADING — реальные сделки не совершаются",
   ].join("\n");
 }
 
 async function recordWaveCandidates(candidates: ElliottCandidate[]) {
-  let recorded = 0;
-  let duplicates = 0;
-  let blocked = 0;
+  const records: {
+    candidate: ElliottCandidate;
+    status: PaperRecordResult;
+    signalId: number | null;
+  }[] = [];
   for (const candidate of candidates) {
     const result = await recordPaperSignal({
       ticker: candidate.ticker,
@@ -2188,9 +2315,10 @@ async function recordWaveCandidates(candidates: ElliottCandidate[]) {
       combinationIds: [],
       source: "wave",
       timeframe: candidate.timeframe,
+      bypassRiskLimits: true,
       metadata: {
         timeframe: candidate.timeframe,
-        strategyFamily: candidate.setupType === "elliott" ? "elliott_fibonacci" : "breakout_retest",
+        strategyFamily: "elliott_fibonacci",
         setupType: candidate.setupType,
         scenario: candidate.scenario,
         invalidationPrice: candidate.invalidationPrice,
@@ -2198,16 +2326,31 @@ async function recordWaveCandidates(candidates: ElliottCandidate[]) {
         stopPercent: candidate.stopPercent,
         historical: candidate.historical,
         fibonacci: candidate.fibonacci,
-        levelPrice: candidate.levelPrice,
-        levelType: candidate.levelType,
         relativeVolume: candidate.relativeVolume,
+        manualReview: true,
       },
     });
-    if (result === "recorded") recorded += 1;
-    else if (result === "duplicate") duplicates += 1;
-    else blocked += 1;
+    const signal = await db
+      .select({ id: signalsHistory.id })
+      .from(signalsHistory)
+      .where(
+        and(
+          eq(signalsHistory.ticker, candidate.ticker),
+          eq(signalsHistory.timeframe, candidate.timeframe),
+          eq(signalsHistory.candleTimestamp, candidate.timestamp),
+          eq(signalsHistory.direction, candidate.direction),
+          sql`COALESCE(${signalsHistory.metadata}->>'source', '') = 'wave'`,
+        ),
+      )
+      .orderBy(desc(signalsHistory.id))
+      .limit(1);
+    records.push({
+      candidate,
+      status: result,
+      signalId: signal[0]?.id ?? null,
+    });
   }
-  return { recorded, duplicates, blocked };
+  return records;
 }
 
 async function refreshWaveData() {
@@ -2279,38 +2422,67 @@ async function refreshWaveData() {
   return latestWaveRefresh;
 }
 
-async function wavesText() {
+async function wavesText(): Promise<TelegramMessage> {
   try {
     await refreshWaveData();
     const scan = await scanElliottWaveStrategies();
-    const paperStatuses = await recordWaveCandidates(scan.candidates);
-    const blocks = scan.candidates
-      .map((candidate, index) => waveCandidateText(candidate, index + 1))
+    const records = await recordWaveCandidates(scan.candidates);
+    const blocks = records
+      .map(({ candidate, signalId }, index) => waveCandidateText(candidate, index + 1, signalId))
       .flatMap((block) => [block, ""]);
-    return [
-      "🌊 ВОЛНОВОЙ АНАЛИЗ · ELLIOTT + FIBONACCI",
+    const buttons = records
+      .filter(({ signalId }) => signalId !== null)
+      .flatMap(({ signalId }) => [
+        [
+          {
+            text: `✅ Сработал #${signalId}`,
+            callback_data: `wave:win:${signalId}`,
+          },
+          {
+            text: `❌ Не сработал #${signalId}`,
+            callback_data: `wave:loss:${signalId}`,
+          },
+        ],
+      ]);
+    const recorded = records.filter(({ status }) => status === "recorded").length;
+    const duplicates = records.filter(({ status }) => status === "duplicate").length;
+    const blocked = records.filter(({ status }) => status === "risk_limit").length;
+    const text = [
+      "🌊 ВОЛНОВОЙ АНАЛИЗ · ELLIOTT + ABC + FIBONACCI",
       "",
       `Проверено серий: ${scan.series} · свежих: ${scan.freshSeries}`,
+      `Найдено текущих сигналов: ${scan.totalCandidates} · показаны топ-${scan.candidates.length}`,
       `Таймфреймы: 30m и 1h · обновлено: ${formatDate(scan.generatedAt)}`,
       "Пивоты подтверждаются будущими свечами и не используются до момента подтверждения.",
-      `Paper-сигналов принято: ${paperStatuses.recorded} · повторов: ${paperStatuses.duplicates} · заблокировано лимитом: ${paperStatuses.blocked}`,
+      `Записано новых: ${recorded} · повторов: ${duplicates} · ошибок записи: ${blocked}`,
       "",
-      blocks.length ? blocks : ["Подтверждённых статистических сценариев сейчас нет.", ""],
+      blocks.length
+        ? blocks
+        : ["Свежих волновых триггеров сейчас нет.", ""],
       scan.unavailable.length
         ? `Не готовы к оценке: ${scan.unavailable.slice(0, 5).join("; ")}${scan.unavailable.length > 5 ? " и другие" : ""}`
         : "Все доступные серии имеют достаточную историю.",
       "",
-      "Сигнал проходит только при минимум 20 исторических случаях, положительной test-expectancy и целевом движении не менее 0,5%.",
+      "Показаны до 5 лучших текущих структурных сигналов по уверенности. Историческая статистика приведена справочно и не блокирует выдачу.",
+      "Уровни поддержки/сопротивления в этот раздел не входят — они будут отдельным анализом.",
+      "После проверки нажмите кнопку результата. Точный процент: /wave_result ID процент.",
       "Важно: это исследовательский paper-сигнал, не финансовая рекомендация.",
     ].join("\n");
+    return {
+      text,
+      replyMarkup: buttons.length ? { inline_keyboard: buttons } : TELEGRAM_MENU,
+    };
   } catch (error) {
     logger.error({ err: error }, "Elliott wave scan failed");
-    return [
+    return {
+      text: [
       "🌊 ВОЛНОВОЙ АНАЛИЗ · ELLIOTT + FIBONACCI",
       "",
       "Не удалось обновить старшие свечи или завершить расчёт.",
       "Сигналы не формирую, чтобы не использовать неполные или устаревшие данные.",
-    ].join("\n");
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
   }
 }
 
@@ -2320,15 +2492,15 @@ async function runWaveScanCycle() {
   try {
     await refreshWaveData();
     const scan = await scanElliottWaveStrategies();
-    const paperStatuses = await recordWaveCandidates(scan.candidates);
+    const records = await recordWaveCandidates(scan.candidates);
     logger.info(
       {
         series: scan.series,
         freshSeries: scan.freshSeries,
         candidates: scan.candidates.length,
-        recorded: paperStatuses.recorded,
-        duplicates: paperStatuses.duplicates,
-        blocked: paperStatuses.blocked,
+        recorded: records.filter(({ status }) => status === "recorded").length,
+        duplicates: records.filter(({ status }) => status === "duplicate").length,
+        blocked: records.filter(({ status }) => status === "risk_limit").length,
       },
       "Elliott wave scan cycle completed",
     );
@@ -3154,6 +3326,9 @@ async function handleMessage(chatId: number, text: string) {
   if (isWavesRequest(text)) {
     return wavesText();
   }
+  if (isWaveStatsRequest(text)) {
+    return waveStatsText();
+  }
   if (normalizedText === "цены" || normalizedText === "котировка") {
     return marketText();
   }
@@ -3178,6 +3353,12 @@ async function handleMessage(chatId: number, text: string) {
   if (normalizedCommand === "/signal") {
     const ticker = argument?.toUpperCase().replace(/[^A-Z0-9_]/g, "");
     return ticker ? signalText(ticker) : "Укажите тикер: /signal SBER";
+  }
+  if (normalizedCommand === "/wave_result") {
+    const parts = trimmedText.split(/\s+/);
+    const signalId = Number(parts[1]);
+    const outcomePercent = Number(String(parts[2] ?? "").replace(",", "."));
+    return manualWaveOutcome(signalId, outcomePercent, "custom");
   }
   if (text.startsWith("/")) {
     return "Неизвестная команда. Используйте /help.";
@@ -3307,6 +3488,7 @@ export function startTelegramBot() {
           { command: "market", description: "Состояние рынка" },
           { command: "intraday", description: "Внутридневной сканер IMOEX" },
           { command: "waves", description: "Волны Эллиотта и Fibonacci" },
+          { command: "wave_stats", description: "Статистика волновых сигналов" },
           { command: "top", description: "Лучшие сигналы" },
           { command: "analogs", description: "Аналогичные рыночные ситуации" },
           { command: "accuracy", description: "Точность paper-сигналов" },
@@ -3338,6 +3520,8 @@ export function startTelegramBot() {
                   callback.id,
                   callbackData.startsWith("signal:")
                     ? "Анализирую акцию..."
+                    : callbackData.startsWith("wave:")
+                      ? "Сохраняю результат волнового сигнала..."
                     : undefined,
                 );
                 if (callbackChatId && callbackData.startsWith("signal:")) {
@@ -3348,6 +3532,16 @@ export function startTelegramBot() {
                   const response = await signalText(ticker);
                   await client.sendMessage(callbackChatId, response);
                   logger.info({ ticker }, "Telegram ticker signal sent");
+                }
+                if (callbackChatId && callbackData.startsWith("wave:")) {
+                  const [, result, rawId] = callbackData.split(":");
+                  const signalId = Number(rawId);
+                  const response =
+                    result === "win"
+                      ? await quickWaveOutcome(signalId, true)
+                      : await quickWaveOutcome(signalId, false);
+                  await client.sendMessage(callbackChatId, response);
+                  logger.info({ signalId, result }, "Telegram wave result saved");
                 }
               } catch (error) {
                 logger.error({ err: error, callbackData }, "Telegram callback failed");
@@ -3401,7 +3595,15 @@ export function startTelegramBot() {
               }
               const response = await handleMessage(message.chat.id, message.text);
               if (response) {
-                await client.sendMessage(message.chat.id, response);
+                if (typeof response === "string") {
+                  await client.sendMessage(message.chat.id, response);
+                } else {
+                  await client.sendMessage(
+                    message.chat.id,
+                    response.text,
+                    response.replyMarkup,
+                  );
+                }
                 logger.info({ command }, "Telegram response sent");
               }
             } catch (error) {
