@@ -36,7 +36,10 @@ type MarketRegime = "BUY" | "SELL" | "NEUTRAL";
 const ROUND_TRIP_COST_PERCENT = 0.2;
 export const COMMODITY_TICKERS = ["XAUUSD", "XAGUSD", "BRENT"] as const;
 export type SmartMoneyUniverse = "imoex" | "commodities";
-export type SmartMoneySource = "smartmoney" | "commodity-smartmoney";
+export type SmartMoneySource =
+  | "smartmoney"
+  | "commodity-smartmoney"
+  | "money-test";
 type SmartMoneyFilterStats = Record<
   | "cooldown"
   | "insufficientHistory"

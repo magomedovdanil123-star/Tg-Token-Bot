@@ -12,3 +12,4 @@
 - [Company analysis output](company-analysis-output.md) — company selection must return the same Smart Money candidate format; send nothing when no entry passes.
 - [Smart Money backtest](smart-money-backtest.md) — evaluate the unchanged SMC candidate rules separately with fixed portfolio sizing, costs, and a five-position cap.
 - [Commodity Smart Money](commodity-smart-money.md) — commodities use Yahoo futures, separate source/statistics, own market regime, and a three-minute Telegram monitor.
+- [Money Test control group](money-test-control.md) — experimental intraday filters and two-minute position monitoring must stay isolated from production Smart Money.

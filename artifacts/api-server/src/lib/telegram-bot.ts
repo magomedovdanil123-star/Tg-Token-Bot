@@ -16,6 +16,7 @@ import {
   pool,
   signalsHistory,
   telegramCommoditySubscriptions,
+  telegramMoneyTestSubscriptions,
 } from "@workspace/db";
 import { logger } from "./logger";
 import { scanMarketAnalogues } from "./market-analog-scanner";
@@ -29,6 +30,10 @@ import {
   scanSmartMoney,
   type SmartMoneyCandidate,
 } from "./smart-money-scanner";
+import {
+  scanMoneyTest,
+  type MoneyTestScan,
+} from "./money-test-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
@@ -43,6 +48,7 @@ const WAVES_BUTTON = "🌊 Волновой анализ";
 const WAVE_STATS_BUTTON = "📒 Статистика волн";
 const SMART_MONEY_BUTTON = "💰 Smart Money";
 const COMMODITIES_BUTTON = "🪙 Сырьё и металлы";
+const MONEY_TEST_BUTTON = "💵 Деньги тест";
 const COMPANY_ANALYSIS_BUTTON = "🔎 Аналитика компании";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
@@ -50,6 +56,7 @@ const INTRADAY_HORIZON_MINUTES = 60;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
 const INTRADAY_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const COMMODITY_SCAN_INTERVAL_MS = 3 * 60 * 1000;
+const MONEY_TEST_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const WAVE_SCAN_INTERVAL_MS = 30 * 60 * 1000;
 const PAPER_COMMISSION_ONE_WAY_PERCENT = 0.05;
 const PAPER_SLIPPAGE_ONE_WAY_PERCENT = 0.05;
@@ -84,6 +91,7 @@ const TELEGRAM_MENU = {
     [WAVES_BUTTON],
     [SMART_MONEY_BUTTON],
     [COMMODITIES_BUTTON],
+    [MONEY_TEST_BUTTON],
     [COMPANY_ANALYSIS_BUTTON],
     [WAVE_STATS_BUTTON],
     [ACCURACY_BUTTON],
@@ -106,6 +114,9 @@ let commodityScanRunning = false;
 let latestCommodityRefresh: Promise<void> | null = null;
 let commodityNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
 const commodityChatIds = new Set<number>();
+let moneyTestScanRunning = false;
+let moneyTestNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
+const moneyTestChatIds = new Set<number>();
 
 async function loadCommoditySubscriptions() {
   const subscriptions = await db
@@ -124,6 +135,27 @@ async function subscribeCommodityChat(chatId: number) {
   commodityChatIds.add(chatId);
   await db
     .insert(telegramCommoditySubscriptions)
+    .values({ chatId })
+    .onConflictDoNothing();
+}
+
+async function loadMoneyTestSubscriptions() {
+  const subscriptions = await db
+    .select({ chatId: telegramMoneyTestSubscriptions.chatId })
+    .from(telegramMoneyTestSubscriptions);
+  for (const subscription of subscriptions) {
+    if (Number.isSafeInteger(subscription.chatId)) {
+      moneyTestChatIds.add(subscription.chatId);
+    }
+  }
+  logger.info({ count: moneyTestChatIds.size }, "Money Test Telegram subscriptions loaded");
+}
+
+async function subscribeMoneyTestChat(chatId: number) {
+  if (!Number.isSafeInteger(chatId)) return;
+  moneyTestChatIds.add(chatId);
+  await db
+    .insert(telegramMoneyTestSubscriptions)
     .values({ chatId })
     .onConflictDoNothing();
 }
@@ -430,7 +462,8 @@ async function recordPaperSignal(input: {
     | "intraday"
     | "wave"
     | "smartmoney"
-    | "commodity-smartmoney";
+    | "commodity-smartmoney"
+    | "money-test";
   timeframe?: string;
   metadata?: Record<string, unknown>;
   bypassRiskLimits?: boolean;
@@ -453,7 +486,9 @@ async function recordPaperSignal(input: {
   if (existing.length) return "duplicate";
 
   const riskScope =
-    input.source === "smartmoney" || input.source === "commodity-smartmoney"
+    input.source === "smartmoney" ||
+    input.source === "commodity-smartmoney" ||
+    input.source === "money-test"
       ? sql`AND metadata ->> 'source' = ${input.source}`
     : sql``;
   const limits = input.bypassRiskLimits
@@ -518,7 +553,11 @@ async function evaluatePaperSignals() {
     FROM signals_history
     WHERE outcome IS NULL
       AND metadata ->> 'paperTrading' = 'true'
-      AND COALESCE(metadata ->> 'source', '') NOT IN ('wave', 'commodity-smartmoney')
+      AND COALESCE(metadata ->> 'source', '') NOT IN (
+        'wave',
+        'commodity-smartmoney',
+        'money-test'
+      )
     ORDER BY id
     LIMIT 500
   `);
@@ -2229,6 +2268,7 @@ function helpText() {
     "/intraday — внутридневной сканер IMOEX",
     "/smartmoney — Smart Money: SMC-сетапы с подтверждением",
     "/commodities — золото, серебро и нефть Brent · Smart Money",
+    "/moneytest — экспериментальный intraday Smart Money",
     "/waves — волны Эллиотта, ABC и Fibonacci",
     "/wave_stats — ручная статистика волновых сигналов",
     "/wave_result ID результат — записать результат сигнала",
@@ -2281,6 +2321,17 @@ function isCommoditiesRequest(text: string) {
     normalizedText === "металлы" ||
     normalizedText === "/commodities" ||
     normalizedText === "/commodity"
+  );
+}
+
+function isMoneyTestRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === MONEY_TEST_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "деньги тест" ||
+    normalizedText === "money test" ||
+    normalizedText === "/moneytest" ||
+    normalizedText === "/money_test"
   );
 }
 
@@ -2590,6 +2641,417 @@ async function commoditiesText(chatId?: number): Promise<TelegramMessage> {
       ].join("\n"),
       replyMarkup: TELEGRAM_MENU,
     };
+  }
+}
+
+async function recordMoneyTestCandidates(
+  candidates: SmartMoneyCandidate[],
+  marketDirection: "BUY" | "SELL" | "NEUTRAL",
+) {
+  let recorded = 0;
+  let duplicates = 0;
+  let blocked = 0;
+  const recordedCandidates: SmartMoneyCandidate[] = [];
+  for (const candidate of candidates) {
+    const result = await recordPaperSignal({
+      ticker: candidate.ticker,
+      featureTimestamp: candidate.timestamp,
+      direction: candidate.direction,
+      confidence: candidate.score,
+      entryPrice: candidate.entryPrice,
+      stopPrice: candidate.stopPrice,
+      targetPrice: candidate.takeProfit2,
+      horizonMinutes: 360,
+      reasons: candidate.reasons,
+      patternIds: [],
+      combinationIds: [],
+      source: "money-test",
+      timeframe: "15m",
+      bypassRiskLimits: true,
+      metadata: {
+        smartMoney: true,
+        moneyTest: true,
+        timeframe: "15m",
+        setupTimeframe: "15m",
+        executionTimeframe: "1m",
+        strategy: "Money-Test-SMC-Intraday",
+        probability: candidate.probability,
+        adaptiveThreshold: candidate.threshold,
+        rewardRisk: candidate.rewardRisk,
+        netRewardRisk: candidate.netRewardRisk,
+        takeProfit1: candidate.takeProfit1,
+        takeProfit2: candidate.takeProfit2,
+        takeProfit3: candidate.takeProfit3,
+        accumulation: candidate.accumulation,
+        structure: candidate.structure,
+        liquidity: candidate.liquidity,
+        orderBlock: candidate.orderBlock,
+        fairValueGap: candidate.fairValueGap,
+        volumeConfirmed: candidate.volumeConfirmed,
+        retestConfirmed: candidate.retestConfirmed,
+        higherTimeframeAgreement: candidate.higherTimeframeAgreement,
+        marketRegime: candidate.marketRegime,
+        bosQuality: candidate.bosQuality,
+        impulseConfirmed: candidate.impulseConfirmed,
+        rangeToAtr: candidate.rangeToAtr,
+        marketDirectionAtEntry: marketDirection,
+        chart: candidate.chart,
+      },
+    });
+    if (result === "recorded") {
+      recorded += 1;
+      recordedCandidates.push(candidate);
+    } else if (result === "duplicate") duplicates += 1;
+    else blocked += 1;
+  }
+  return { recorded, duplicates, blocked, recordedCandidates };
+}
+
+async function moneyTestText(chatId?: number): Promise<TelegramMessage> {
+  if (chatId !== undefined) await subscribeMoneyTestChat(chatId);
+  try {
+    await ensureSmartMoneyDataFresh();
+    await ensureSmartMoneyHigherTimeframes(false);
+    const scan = await scanMoneyTest();
+    const records = await recordMoneyTestCandidates(scan.candidates, scan.market.direction);
+    const marketDirection =
+      scan.market.direction === "BUY"
+        ? "бычий"
+        : scan.market.direction === "SELL"
+          ? "медвежий"
+          : "нейтральный";
+    const blocks = scan.candidates.map((candidate, index) =>
+      smartMoneyCandidateText(candidate, index + 1),
+    );
+    const rejectedPreview = scan.rejected
+      .slice(0, 5)
+      .map(({ ticker, reasons }) => `${ticker}: ${reasons[0]}`)
+      .join("; ");
+    return {
+      text: [
+        "💵 ДЕНЬГИ ТЕСТ · ЭКСПЕРИМЕНТАЛЬНЫЙ INTRADAY SMC",
+        "",
+        `Проверено акций: ${scan.base.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
+        `Режим рынка: ${marketDirection} · breadth: ${formatNumber(scan.market.breadthPercent, 1)}%`,
+        `Растут: ${scan.market.advancers} · снижаются: ${scan.market.decliners} · без изменения: ${scan.market.unchanged}`,
+        `Торговое окно: ${scan.market.inTradeWindow ? "активно" : "неактивно"} · ${scan.market.sessionLabel}`,
+        "",
+        "Новые фильтры теста: время сессии, ширина рынка, точка входа возле OB/FVG или ретест, объём и текущая ликвидность.",
+        `Кандидатов после экспериментальных фильтров: ${scan.candidates.length}`,
+        `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates}`,
+        rejectedPreview
+          ? `Примеры отсева: ${rejectedPreview}`
+          : "Дополнительных отсеянных кандидатов нет.",
+        "",
+        ...(blocks.length
+          ? blocks.flatMap((block) => [block, ""])
+          : [
+              "Свежих тестовых сетапов сейчас нет.",
+              "",
+              "Это не означает отсутствие движения: только базовый SMC-сетап, рыночный контекст и качество входа должны совпасть одновременно.",
+              "",
+            ]),
+        "Проверка рынка и открытых paper-позиций: каждые 2 минуты.",
+        "При потере структуры, объёма, ликвидности или развороте рынка бот отправит REDUCE либо EXIT.",
+        "Контрольная группа: обычный раздел Smart Money не изменяется.",
+        "PAPER TRADING — реальные сделки не совершаются. Не финансовая рекомендация.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  } catch (error) {
+    logger.error({ err: error }, "Money Test scan failed");
+    return {
+      text: [
+        "💵 ДЕНЬГИ ТЕСТ · ЭКСПЕРИМЕНТАЛЬНЫЙ INTRADAY SMC",
+        "",
+        "Не удалось завершить экспериментальный скан.",
+        "Сигналы не формирую, чтобы не использовать неполные или устаревшие данные.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  }
+}
+
+type MoneyTestMonitorEvent = {
+  kind: "REDUCE" | "EXIT";
+  reason: string;
+  price: number;
+  timestamp: Date;
+};
+
+function moneyTestMonitorMessage(
+  ticker: string,
+  direction: string,
+  event: MoneyTestMonitorEvent,
+) {
+  return [
+    `🚨 ДЕНЬГИ ТЕСТ · ${event.kind === "EXIT" ? "ПОЛНЫЙ ВЫХОД" : "СОКРАТИТЬ ПОЗИЦИЮ"}`,
+    "",
+    `${ticker} · ${direction === "BUY" ? "LONG" : "SHORT"}`,
+    `Цена: ${formatNumber(event.price)}`,
+    `Причина: ${event.reason}`,
+    `Время: ${formatDate(event.timestamp)}`,
+    "",
+    event.kind === "EXIT"
+      ? "Экспериментальный сценарий больше не подтверждается. Для paper-позиции зафиксирован полный выход."
+      : "Сценарий ослабевает. Для paper-позиции зафиксировано сокращение позиции и ужесточение защиты.",
+    "Рабочий Smart Money-раздел не затронут.",
+    "PAPER TRADING — реальные сделки не совершаются. Не финансовая рекомендация.",
+  ].join("\n");
+}
+
+async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
+  const liveDirections = new Map(
+    scan.base.diagnostics.map((diagnostic) => [diagnostic.ticker, diagnostic.direction]),
+  );
+  const active = await db.execute(sql`
+    SELECT id, ticker, direction, entry_price, stop_price, metadata
+    FROM signals_history
+    WHERE outcome IS NULL
+      AND metadata ->> 'source' = 'money-test'
+    ORDER BY id
+  `);
+  for (const raw of active.rows) {
+    const row = raw as Record<string, unknown>;
+    const id = Number(row.id);
+    const ticker = String(row.ticker);
+    const direction = String(row.direction);
+    const entry = Number(row.entry_price);
+    const stop = Number(row.stop_price);
+    const metadata =
+      row.metadata && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : {};
+    const latest = await db.execute(sql`
+      SELECT timestamp, high, low, close, volume
+      FROM candles
+      WHERE ticker = ${ticker} AND timeframe = '1m'
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+    const candle = latest.rows[0] as Record<string, unknown> | undefined;
+    if (!candle) continue;
+    const timestamp =
+      candle.timestamp instanceof Date ? candle.timestamp : new Date(String(candle.timestamp));
+    const price = Number(candle.close);
+    const high = Number(candle.high);
+    const low = Number(candle.low);
+    const volume = Number(candle.volume);
+    if (
+      !Number.isFinite(id) ||
+      !Number.isFinite(entry) ||
+      !Number.isFinite(stop) ||
+      !Number.isFinite(price) ||
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(volume) ||
+      !Number.isFinite(timestamp.getTime())
+    ) {
+      continue;
+    }
+    const target1 = Number(metadata.takeProfit1);
+    const target2 = Number(metadata.takeProfit2);
+    const target3 = Number(metadata.takeProfit3);
+    const lastEvent = String(metadata.moneyTestLastEvent ?? "");
+    const entryMarketDirection = String(metadata.marketDirectionAtEntry ?? "NEUTRAL");
+    const currentMarketDirection = scan.market.direction;
+    const volumeWindowStart = new Date(timestamp.getTime() - 20 * 60_000);
+    const volumeBaselineStart = new Date(timestamp.getTime() - 4 * 60 * 60_000);
+    const volumeStats = await db.execute(sql`
+      SELECT
+        AVG(volume) FILTER (WHERE timestamp >= ${volumeWindowStart}) AS recent_volume,
+        AVG(volume) FILTER (
+          WHERE timestamp < ${volumeWindowStart}
+            AND timestamp >= ${volumeBaselineStart}
+        ) AS baseline_volume
+      FROM candles
+      WHERE ticker = ${ticker}
+        AND timeframe = '1m'
+        AND timestamp >= ${volumeBaselineStart}
+        AND timestamp <= ${timestamp}
+    `);
+    const volumeRow = (volumeStats.rows[0] ?? {}) as Record<string, unknown>;
+    const recentVolume = Number(volumeRow.recent_volume);
+    const baselineVolume = Number(volumeRow.baseline_volume);
+    const volumeRatio =
+      Number.isFinite(recentVolume) &&
+      Number.isFinite(baselineVolume) &&
+      baselineVolume > 0
+        ? recentVolume / baselineVolume
+        : null;
+    let event: MoneyTestMonitorEvent | null = null;
+    if ((direction === "BUY" && low <= stop) || (direction === "SELL" && high >= stop)) {
+      event = {
+        kind: "EXIT",
+        reason: `достигнут Stop Loss ${formatNumber(stop)}`,
+        price,
+        timestamp,
+      };
+    } else if (
+      (currentMarketDirection === "BUY" && direction === "SELL") ||
+      (currentMarketDirection === "SELL" && direction === "BUY")
+    ) {
+      event = {
+        kind: "EXIT",
+        reason: `ширина рынка развернулась против позиции: ${currentMarketDirection === "BUY" ? "BUY" : "SELL"}`,
+        price,
+        timestamp,
+      };
+    } else if (
+      currentMarketDirection === "NEUTRAL" &&
+      (entryMarketDirection === "BUY" || entryMarketDirection === "SELL") &&
+      lastEvent !== "market_reduce"
+    ) {
+      event = {
+        kind: "REDUCE",
+        reason: "ширина рынка перешла в нейтральную фазу",
+        price,
+        timestamp,
+      };
+    } else if (volumeRatio !== null && volumeRatio < 0.65 && lastEvent !== "volume_reduce") {
+      event = {
+        kind: "REDUCE",
+        reason: `объём/ликвидность снизились до ${volumeRatio.toFixed(2)}x базового уровня`,
+        price,
+        timestamp,
+      };
+    } else if (liveDirections.get(ticker) === null) {
+      event = {
+        kind: "EXIT",
+        reason: "базовая SMC-структура больше не подтверждается",
+        price,
+        timestamp,
+      };
+    } else if (
+      liveDirections.get(ticker) &&
+      liveDirections.get(ticker) !== direction
+    ) {
+      event = {
+        kind: "EXIT",
+        reason: `направление структуры развернулось в ${liveDirections.get(ticker) === "BUY" ? "LONG" : "SHORT"}`,
+        price,
+        timestamp,
+      };
+    } else if (
+      Number.isFinite(target3) &&
+      ((direction === "BUY" && high >= target3) || (direction === "SELL" && low <= target3)) &&
+      lastEvent !== "tp3_exit"
+    ) {
+      event = {
+        kind: "EXIT",
+        reason: `достигнут Take Profit 3 ${formatNumber(target3)}`,
+        price,
+        timestamp,
+      };
+    } else if (
+      Number.isFinite(target2) &&
+      ((direction === "BUY" && high >= target2) || (direction === "SELL" && low <= target2)) &&
+      !["tp2_reduce", "tp3_exit"].includes(lastEvent)
+    ) {
+      event = {
+        kind: "REDUCE",
+        reason: `достигнут Take Profit 2 ${formatNumber(target2)}`,
+        price,
+        timestamp,
+      };
+    } else if (
+      Number.isFinite(target1) &&
+      ((direction === "BUY" && high >= target1) || (direction === "SELL" && low <= target1)) &&
+      !["tp1_reduce", "tp2_reduce", "tp3_exit"].includes(lastEvent)
+    ) {
+      event = {
+        kind: "REDUCE",
+        reason: `достигнут Take Profit 1 ${formatNumber(target1)}`,
+        price,
+        timestamp,
+      };
+    }
+    if (!event) continue;
+    const eventKey =
+      event.kind === "EXIT"
+        ? event.reason.includes("Take Profit 3")
+          ? "tp3_exit"
+          : "exit"
+        : event.reason.includes("Take Profit 2")
+          ? "tp2_reduce"
+          : event.reason.includes("объём/ликвидность")
+            ? "volume_reduce"
+          : event.reason.includes("ширина рынка")
+            ? "market_reduce"
+          : "tp1_reduce";
+    const updated = await db.execute(sql`
+      UPDATE signals_history
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({
+        moneyTestLastEvent: eventKey,
+        moneyTestLastEventAt: timestamp.toISOString(),
+        moneyTestLastEventReason: event.reason,
+      })}::jsonb
+      WHERE id = ${id}
+        AND outcome IS NULL
+        AND COALESCE(metadata ->> 'moneyTestLastEvent', '') <> ${eventKey}
+      RETURNING id
+    `);
+    if (!updated.rows.length) continue;
+    if (event.kind === "EXIT") {
+      const gross =
+        direction === "BUY"
+          ? ((price - entry) / entry) * 100
+          : ((entry - price) / entry) * 100;
+      await db.execute(sql`
+        UPDATE signals_history
+        SET outcome = 'EXIT',
+            outcome_percent = ${gross - PAPER_TRANSACTION_COST_PERCENT},
+            outcome_at = ${timestamp}
+        WHERE id = ${id}
+          AND outcome IS NULL
+      `);
+    }
+    if (!moneyTestNotifier) continue;
+    const message = moneyTestMonitorMessage(ticker, direction, event);
+    for (const chatId of moneyTestChatIds) {
+      await moneyTestNotifier(chatId, message);
+    }
+  }
+}
+
+async function runMoneyTestScanCycle() {
+  if (moneyTestScanRunning) return;
+  moneyTestScanRunning = true;
+  try {
+    await refreshLatestIntradayData();
+    await ensureSmartMoneyHigherTimeframes(false);
+    const scan = await scanMoneyTest();
+    const records = await recordMoneyTestCandidates(
+      scan.candidates,
+      scan.market.direction,
+    );
+    if (moneyTestNotifier && records.recordedCandidates.length) {
+      for (const candidate of records.recordedCandidates) {
+        const message = [
+          "💵 НОВЫЙ СИГНАЛ · ДЕНЬГИ ТЕСТ",
+          "",
+          smartMoneyCandidateText(candidate, 1),
+        ].join("\n");
+        for (const chatId of moneyTestChatIds) {
+          await moneyTestNotifier(chatId, message);
+        }
+      }
+    }
+    await runMoneyTestPositionMonitor(scan);
+    logger.info(
+      {
+        analyzed: scan.base.analyzed,
+        baseCandidates: scan.base.candidates.length,
+        candidates: scan.candidates.length,
+        recorded: records.recorded,
+        duplicates: records.duplicates,
+      },
+      "Money Test scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Money Test scan cycle skipped");
+  } finally {
+    moneyTestScanRunning = false;
   }
 }
 
@@ -4586,6 +5048,9 @@ async function handleMessage(chatId: number, text: string) {
   if (isCommoditiesRequest(text)) {
     return commoditiesText(chatId);
   }
+  if (isMoneyTestRequest(text)) {
+    return moneyTestText(chatId);
+  }
   if (isWavesRequest(text)) {
     return wavesText();
   }
@@ -4715,6 +5180,7 @@ export function startTelegramBot() {
   const controller = new AbortController();
   const client = createTelegramClient(token);
   commodityNotifier = client.sendMessage;
+  moneyTestNotifier = client.sendMessage;
   const intradayScanTimer = setInterval(() => {
     void runIntradayScanCycle();
   }, INTRADAY_SCAN_INTERVAL_MS);
@@ -4727,6 +5193,9 @@ export function startTelegramBot() {
   const commodityScanTimer = setInterval(() => {
     void runCommodityScanCycle();
   }, COMMODITY_SCAN_INTERVAL_MS);
+  const moneyTestScanTimer = setInterval(() => {
+    void runMoneyTestScanCycle();
+  }, MONEY_TEST_SCAN_INTERVAL_MS);
   const paperEvaluationTimer = setInterval(() => {
     if (paperEvaluationRunning) return;
     paperEvaluationRunning = true;
@@ -4746,8 +5215,10 @@ export function startTelegramBot() {
     clearInterval(waveScanTimer);
     clearInterval(smartMoneyScanTimer);
     clearInterval(commodityScanTimer);
+    clearInterval(moneyTestScanTimer);
     clearInterval(paperEvaluationTimer);
     commodityNotifier = null;
+    moneyTestNotifier = null;
   };
 
   void (async () => {
@@ -4755,6 +5226,7 @@ export function startTelegramBot() {
       const me = await client.getMe();
       await client.deleteWebhook();
       await loadCommoditySubscriptions();
+      await loadMoneyTestSubscriptions();
       await client.setMyCommands(
         JSON.stringify([
           { command: "analysis", description: "Smart Money по выбранной акции" },
@@ -4764,6 +5236,7 @@ export function startTelegramBot() {
           { command: "intraday", description: "Внутридневной сканер IMOEX" },
           { command: "smartmoney", description: "Smart Money SMC-сетапы IMOEX" },
           { command: "commodities", description: "Золото, серебро и Brent · Smart Money" },
+          { command: "moneytest", description: "Экспериментальный intraday Smart Money" },
           { command: "waves", description: "Волны Эллиотта и Fibonacci" },
           { command: "wave_stats", description: "Статистика волновых сигналов" },
           { command: "top", description: "Лучшие сигналы" },
@@ -4777,6 +5250,7 @@ export function startTelegramBot() {
       void runIntradayScanCycle();
       void runSmartMoneyScanCycle();
       void runCommodityScanCycle();
+      void runMoneyTestScanCycle();
       void runWaveScanCycle();
 
       while (running) {
