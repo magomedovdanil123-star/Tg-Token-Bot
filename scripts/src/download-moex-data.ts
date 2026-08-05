@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
 import {
   candles,
   db,
@@ -33,12 +33,15 @@ const TIMEFRAME = arg("timeframe", "10m");
 const INTERVAL_BY_TIMEFRAME: Record<string, number> = {
   "1m": 1,
   "10m": 10,
+  "30m": 30,
+  "1h": 60,
 };
 const INTERVAL = INTERVAL_BY_TIMEFRAME[TIMEFRAME];
 if (!INTERVAL) {
-  throw new Error(`Неподдерживаемый timeframe: ${TIMEFRAME}. Доступны 1m и 10m.`);
+  throw new Error(`Неподдерживаемый timeframe: ${TIMEFRAME}. Доступны 1m, 10m, 30m и 1h.`);
 }
-const IS_INTRADAY_TIMEFRAME = TIMEFRAME === "1m";
+const IS_FEATURE_TIMEFRAME = TIMEFRAME === "10m";
+const IS_RAW_ONLY_TIMEFRAME = !IS_FEATURE_TIMEFRAME;
 const PAGE_SIZE = 500;
 const REQUEST_DELAY_MS = 120;
 const LOOKBACK_DAYS = Math.max(1, Number(arg("days", "5")) || 5);
@@ -181,6 +184,82 @@ async function getCandles(
     await sleep(REQUEST_DELAY_MS);
   }
   return result;
+}
+
+async function getAggregated30mCandles(
+  ticker: string,
+  start: string,
+  till: string,
+): Promise<CandleRow[]> {
+  const startDate = new Date(`${start}T00:00:00.000Z`);
+  const endDate = new Date(`${till}T23:59:59.999Z`);
+  const rows = await db
+    .select({
+      timestamp: candles.timestamp,
+      open: candles.open,
+      high: candles.high,
+      low: candles.low,
+      close: candles.close,
+      volume: candles.volume,
+      value: candles.value,
+    })
+    .from(candles)
+    .where(
+      and(
+        eq(candles.ticker, ticker),
+        eq(candles.timeframe, "10m"),
+        gte(candles.timestamp, startDate),
+        lte(candles.timestamp, endDate),
+      ),
+    )
+    .orderBy(asc(candles.timestamp));
+
+  const buckets = new Map<number, CandleRow>();
+  for (const row of rows) {
+    const bucketMs = Math.floor(row.timestamp.getTime() / (30 * 60_000)) * 30 * 60_000;
+    const current = buckets.get(bucketMs);
+    if (!current) {
+      buckets.set(bucketMs, {
+        ticker,
+        timestamp: new Date(bucketMs),
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        volume: row.volume,
+        value: row.value,
+      });
+      continue;
+    }
+    current.high = Math.max(current.high, row.high);
+    current.low = Math.min(current.low, row.low);
+    current.close = row.close;
+    current.volume += row.volume;
+    current.value =
+      current.value == null || row.value == null
+        ? current.value ?? row.value ?? undefined
+        : current.value + row.value;
+  }
+  return [...buckets.values()].sort(
+    (left, right) => left.timestamp.getTime() - right.timestamp.getTime(),
+  );
+}
+
+async function loadTimeframeCandles(
+  ticker: string,
+  start: string,
+  till: string,
+  engine: "stock" | "index" = "stock",
+  market: "shares" | "index" = "shares",
+  board = "TQBR",
+) {
+  const direct = await getCandles(ticker, start, till, engine, market, board);
+  if (TIMEFRAME !== "30m" || direct.length > 0) return direct;
+  const aggregated = await getAggregated30mCandles(ticker, start, till);
+  if (aggregated.length > 0) {
+    console.log(`${ticker}: 30m построен агрегацией из сохранённых 10m (${aggregated.length} свечей)`);
+  }
+  return aggregated;
 }
 
 function average(values: number[]): number | undefined {
@@ -719,8 +798,8 @@ async function main() {
   }
 
   if (arg("features-only", "false") === "true") {
-    if (IS_INTRADAY_TIMEFRAME) {
-      throw new Error("Для timeframe=1m расчёт общей таблицы features отключён");
+    if (!IS_FEATURE_TIMEFRAME) {
+      throw new Error(`Для timeframe=${TIMEFRAME} расчёт общей таблицы features отключён`);
     }
     const featuresStart = integerArg("features-start", 0);
     const featuresLimit = integerArg("features-limit", 1000);
@@ -793,9 +872,9 @@ async function main() {
 
     for (const ticker of allTickers) {
       try {
-        const rows = await getCandles(ticker.secid, startDate, endDate);
+        const rows = await loadTimeframeCandles(ticker.secid, startDate, endDate);
         candlesLoaded += await saveCandles(rows);
-        if (!IS_INTRADAY_TIMEFRAME) {
+        if (IS_FEATURE_TIMEFRAME) {
           featuresCalculated += await calculateLatestFeature(ticker.secid);
         }
         tickersProcessed += 1;
@@ -808,7 +887,7 @@ async function main() {
     }
 
     try {
-      const indexRows = await getCandles(
+      const indexRows = await loadTimeframeCandles(
         "IMOEX",
         startDate,
         endDate,
@@ -817,10 +896,10 @@ async function main() {
         "SNDX",
       );
       candlesLoaded += await saveCandles(indexRows);
-      if (!IS_INTRADAY_TIMEFRAME) {
+      if (IS_FEATURE_TIMEFRAME) {
         featuresCalculated += await calculateLatestFeature("IMOEX");
       }
-      if (indexRows.length > 0 && !IS_INTRADAY_TIMEFRAME) {
+      if (indexRows.length > 0 && IS_FEATURE_TIMEFRAME) {
         await db
           .insert(marketContext)
           .values(
@@ -929,9 +1008,9 @@ async function main() {
       const ticker = tickers[index];
       try {
         await saveTicker(ticker, startRank + index + 1);
-        const rows = await getCandles(ticker.secid, startDate, endDate);
+        const rows = await loadTimeframeCandles(ticker.secid, startDate, endDate);
         const inserted = await saveCandles(rows);
-        const featureCount = IS_INTRADAY_TIMEFRAME
+        const featureCount = IS_RAW_ONLY_TIMEFRAME
           ? 0
           : await calculateFeatures(ticker.secid);
         candlesLoaded += inserted;
@@ -960,7 +1039,7 @@ async function main() {
 
     if (!skipContext) {
       try {
-        const indexRows = await getCandles(
+        const indexRows = await loadTimeframeCandles(
           "IMOEX",
           startDate,
           endDate,
@@ -969,7 +1048,7 @@ async function main() {
           "SNDX",
         );
         candlesLoaded += await saveCandles(indexRows);
-        if (indexRows.length > 0 && !IS_INTRADAY_TIMEFRAME) {
+        if (indexRows.length > 0 && IS_FEATURE_TIMEFRAME) {
           await db
             .insert(marketContext)
             .values(
@@ -984,7 +1063,7 @@ async function main() {
             )
             .onConflictDoNothing({ target: marketContext.timestamp });
         }
-        if (!IS_INTRADAY_TIMEFRAME) {
+        if (IS_FEATURE_TIMEFRAME) {
           featuresCalculated += await calculateFeatures("IMOEX");
         }
         console.log(`IMOEX: ${indexRows.length} свечей`);

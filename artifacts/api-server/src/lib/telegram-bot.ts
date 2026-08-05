@@ -19,6 +19,11 @@ import {
 import { logger } from "./logger";
 import { scanMarketAnalogues } from "./market-analog-scanner";
 import { scanIntraday, type IntradayCandidate } from "./intraday-scanner";
+import {
+  scanElliottWaveStrategies,
+  type ElliottCandidate,
+  type ElliottScanResult,
+} from "./elliott-wave-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
@@ -29,11 +34,13 @@ const SIGNAL_PICKER_BUTTON = "🎯 Сигнал по тикеру";
 const ANALOG_BUTTON = "📊 Аналогичные рыночные ситуации";
 const ACCURACY_BUTTON = "📊 Точность сигналов";
 const INTRADAY_BUTTON = "⚡ Внутри дня";
+const WAVES_BUTTON = "🌊 Волновой анализ";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
 const INTRADAY_SCAN_INTERVAL_MS = 10 * 60 * 1000;
+const WAVE_SCAN_INTERVAL_MS = 30 * 60 * 1000;
 const PAPER_COMMISSION_ONE_WAY_PERCENT = 0.05;
 const PAPER_SLIPPAGE_ONE_WAY_PERCENT = 0.05;
 const PAPER_TRANSACTION_COST_PERCENT =
@@ -62,6 +69,7 @@ const TELEGRAM_MENU = {
     ["🔥 Лучшие сигналы", "📋 Состав IMOEX"],
     [ANALOG_BUTTON],
     [INTRADAY_BUTTON],
+    [WAVES_BUTTON],
     [ACCURACY_BUTTON],
     ["📈 Состояние рынка", "❓ Помощь"],
   ],
@@ -71,8 +79,10 @@ const TELEGRAM_MENU = {
 let researchRefreshRunning = false;
 let latestMarketRefresh: Promise<void> | null = null;
 let latestIntradayRefresh: Promise<void> | null = null;
+let latestWaveRefresh: Promise<void> | null = null;
 let paperEvaluationRunning = false;
 let intradayScanRunning = false;
+let waveScanRunning = false;
 
 type PaperRecordResult = "recorded" | "duplicate" | "risk_limit";
 
@@ -364,7 +374,7 @@ async function recordPaperSignal(input: {
   reasons: string[];
   patternIds: number[];
   combinationIds: number[];
-  source: "telegram" | "top" | "intraday";
+  source: "telegram" | "top" | "intraday" | "wave";
   timeframe?: string;
   metadata?: Record<string, unknown>;
 }): Promise<PaperRecordResult> {
@@ -469,7 +479,12 @@ async function evaluatePaperSignals() {
       row.metadata && typeof row.metadata === "object"
         ? (row.metadata as Record<string, unknown>)
         : {};
-    const candleTimeframe = metadata.intraday === true ? "1m" : TIMEFRAME;
+    const candleTimeframe =
+      metadata.intraday === true
+        ? "1m"
+        : typeof metadata.timeframe === "string"
+          ? metadata.timeframe
+          : TIMEFRAME;
     if (
       !Number.isFinite(id) ||
       !Number.isFinite(entryPrice) ||
@@ -2046,6 +2061,7 @@ function helpText() {
     "",
     "Команды:",
     "/intraday — внутридневной сканер IMOEX",
+    "/waves — волны Эллиотта, Fibonacci и пробои/ретесты",
     "/signal SBER — сигнал по тикеру",
     "/imoex — состав индекса IMOEX",
     "/market — состояние IMOEX",
@@ -2066,6 +2082,16 @@ function isIntradayRequest(text: string) {
     normalizedText === "внутри дня" ||
     normalizedText === "внутридневная торговля" ||
     normalizedText === "/intraday"
+  );
+}
+
+function isWavesRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === WAVES_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "волновой анализ" ||
+    normalizedText === "волны эллиотта" ||
+    normalizedText === "/waves"
   );
 }
 
@@ -2098,6 +2124,219 @@ function intradayCandidateText(candidate: IntradayCandidate, index: number) {
     "Стакан: не используется — публичный MOEX endpoint не отдал orderbook",
     "Режим: PAPER TRADING — реальные сделки не совершаются",
   ].join("\n");
+}
+
+function waveHorizonMinutes(timeframe: string) {
+  return timeframe === "30m" ? 720 : 1440;
+}
+
+function waveCandidateText(candidate: ElliottCandidate, index: number) {
+  const isLong = candidate.direction === "BUY";
+  const fib = candidate.fibonacci;
+  const historical = candidate.historical;
+  const statsLine = historical.testWinRate === null
+    ? "Историческая статистика: недостаточно данных"
+    : `Исторический win rate: ${formatNumber(historical.winRate, 1)}% · test: ${formatNumber(historical.testWinRate, 1)}%`;
+  const targetSign = isLong ? "+" : "-";
+  const stopSign = isLong ? "-" : "+";
+  return [
+    `${index}. ${candidate.ticker} — ${isLong ? "LONG" : "SHORT"} · ${candidate.timeframe}`,
+    `Сценарий: ${candidate.scenario}`,
+    `Уверенность структуры: ${formatNumber(candidate.confidence, 0)}%`,
+    `Вход: ${formatNumber(candidate.entryPrice)}`,
+    `Take profit: ${formatNumber(candidate.targetPrice)} (${targetSign}${formatNumber(candidate.targetPercent, 2)}%)`,
+    `Stop loss: ${formatNumber(candidate.stopPrice)} (${stopSign}${formatNumber(candidate.stopPercent, 2)}%)`,
+    `Инвалидация сценария: ${formatNumber(candidate.invalidationPrice)}`,
+    `Минимальный целевой потенциал 0,5%: выполнен`,
+    statsLine,
+    `Случаев: ${historical.occurrences} · test-наблюдений: ${historical.testOccurrences}`,
+    `Profit factor: ${formatNumber(historical.profitFactor)} · expectancy: ${formatNumber(historical.expectancy, 3)}%`,
+    `Test expectancy: ${formatNumber(historical.testExpectancy, 3)}% · max drawdown: ${formatNumber(historical.maxDrawdown, 2)}%`,
+    `Доверительный интервал win rate: ${formatNumber(historical.confidenceLow, 1)}–${formatNumber(historical.confidenceHigh, 1)}%`,
+    fib
+      ? `Fibonacci: ${fib.retracementZone} · retracement ${fib.retracement === null ? "—" : `${formatNumber(fib.retracement * 100, 1)}%`} · extension ${fib.extension === null ? "—" : formatNumber(fib.extension, 2)}x`
+      : "Fibonacci: нет подтверждённой пары anchors",
+    candidate.levelPrice === null
+      ? "Ближайший уровень: не найден"
+      : `Ближайший уровень: ${candidate.levelType === "support" ? "поддержка" : "сопротивление"} ${formatNumber(candidate.levelPrice)}`,
+    candidate.relativeVolume === null
+      ? "Относительный объём: —"
+      : `Относительный объём: ${formatNumber(candidate.relativeVolume, 2)}x`,
+    "Подтверждения:",
+    ...candidate.reasons.map((reason) => `• ${reason}`),
+    `Paper-горизонт: ${waveHorizonMinutes(candidate.timeframe)} минут`,
+    "Режим: PAPER TRADING — реальные сделки не совершаются",
+  ].join("\n");
+}
+
+async function recordWaveCandidates(candidates: ElliottCandidate[]) {
+  let recorded = 0;
+  let duplicates = 0;
+  let blocked = 0;
+  for (const candidate of candidates) {
+    const result = await recordPaperSignal({
+      ticker: candidate.ticker,
+      featureTimestamp: candidate.timestamp,
+      direction: candidate.direction,
+      confidence: candidate.confidence,
+      entryPrice: candidate.entryPrice,
+      stopPrice: candidate.stopPrice,
+      targetPrice: candidate.targetPrice,
+      horizonMinutes: waveHorizonMinutes(candidate.timeframe),
+      reasons: candidate.reasons,
+      patternIds: [],
+      combinationIds: [],
+      source: "wave",
+      timeframe: candidate.timeframe,
+      metadata: {
+        timeframe: candidate.timeframe,
+        strategyFamily: candidate.setupType === "elliott" ? "elliott_fibonacci" : "breakout_retest",
+        setupType: candidate.setupType,
+        scenario: candidate.scenario,
+        invalidationPrice: candidate.invalidationPrice,
+        targetPercent: candidate.targetPercent,
+        stopPercent: candidate.stopPercent,
+        historical: candidate.historical,
+        fibonacci: candidate.fibonacci,
+        levelPrice: candidate.levelPrice,
+        levelType: candidate.levelType,
+        relativeVolume: candidate.relativeVolume,
+      },
+    });
+    if (result === "recorded") recorded += 1;
+    else if (result === "duplicate") duplicates += 1;
+    else blocked += 1;
+  }
+  return { recorded, duplicates, blocked };
+}
+
+async function refreshWaveData() {
+  if (latestWaveRefresh) return latestWaveRefresh;
+  latestWaveRefresh = (async () => {
+    if (latestIntradayRefresh) await latestIntradayRefresh;
+    if (latestMarketRefresh) await latestMarketRefresh;
+    const counts = await db.execute(sql`
+      SELECT timeframe, COUNT(*)::int AS count
+      FROM candles
+      WHERE timeframe IN ('30m', '1h')
+      GROUP BY timeframe
+    `);
+    const countByTimeframe = new Map(
+      counts.rows.map((row) => [
+        String((row as { timeframe: string }).timeframe),
+        Number((row as { count: number }).count) || 0,
+      ]),
+    );
+    for (const timeframe of ["30m", "1h"] as const) {
+      const days = (countByTimeframe.get(timeframe) ?? 0) >= 5000 ? 5 : 730;
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(
+          "pnpm",
+          [
+            "--filter",
+            "@workspace/scripts",
+            "run",
+            "download-moex",
+            "--",
+            "--latest-only=true",
+            `--timeframe=${timeframe}`,
+            `--days=${days}`,
+          ],
+          {
+            cwd: process.cwd(),
+            env: process.env,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        child.stdout.on("data", (chunk: Buffer) => {
+          logger.info(
+            { output: chunk.toString().trim(), timeframe },
+            "Wave timeframe refresh output",
+          );
+        });
+        child.stderr.on("data", (chunk: Buffer) => {
+          logger.warn(
+            { output: chunk.toString().trim(), timeframe },
+            "Wave timeframe refresh error output",
+          );
+        });
+        child.once("error", reject);
+        child.once("exit", (code, signal) => {
+          if (code === 0) resolve();
+          else {
+            reject(
+              new Error(
+                `Обновление ${timeframe} завершилось с кодом ${code ?? "нет"}${signal ? ` (${signal})` : ""}`,
+              ),
+            );
+          }
+        });
+      });
+    }
+  })().finally(() => {
+    latestWaveRefresh = null;
+  });
+  return latestWaveRefresh;
+}
+
+async function wavesText() {
+  try {
+    await refreshWaveData();
+    const scan = await scanElliottWaveStrategies();
+    const paperStatuses = await recordWaveCandidates(scan.candidates);
+    const blocks = scan.candidates
+      .map((candidate, index) => waveCandidateText(candidate, index + 1))
+      .flatMap((block) => [block, ""]);
+    return [
+      "🌊 ВОЛНОВОЙ АНАЛИЗ · ELLIOTT + FIBONACCI",
+      "",
+      `Проверено серий: ${scan.series} · свежих: ${scan.freshSeries}`,
+      `Таймфреймы: 30m и 1h · обновлено: ${formatDate(scan.generatedAt)}`,
+      "Пивоты подтверждаются будущими свечами и не используются до момента подтверждения.",
+      `Paper-сигналов принято: ${paperStatuses.recorded} · повторов: ${paperStatuses.duplicates} · заблокировано лимитом: ${paperStatuses.blocked}`,
+      "",
+      blocks.length ? blocks : ["Подтверждённых статистических сценариев сейчас нет.", ""],
+      scan.unavailable.length
+        ? `Не готовы к оценке: ${scan.unavailable.slice(0, 5).join("; ")}${scan.unavailable.length > 5 ? " и другие" : ""}`
+        : "Все доступные серии имеют достаточную историю.",
+      "",
+      "Сигнал проходит только при минимум 20 исторических случаях, положительной test-expectancy и целевом движении не менее 0,5%.",
+      "Важно: это исследовательский paper-сигнал, не финансовая рекомендация.",
+    ].join("\n");
+  } catch (error) {
+    logger.error({ err: error }, "Elliott wave scan failed");
+    return [
+      "🌊 ВОЛНОВОЙ АНАЛИЗ · ELLIOTT + FIBONACCI",
+      "",
+      "Не удалось обновить старшие свечи или завершить расчёт.",
+      "Сигналы не формирую, чтобы не использовать неполные или устаревшие данные.",
+    ].join("\n");
+  }
+}
+
+async function runWaveScanCycle() {
+  if (waveScanRunning) return;
+  waveScanRunning = true;
+  try {
+    await refreshWaveData();
+    const scan = await scanElliottWaveStrategies();
+    const paperStatuses = await recordWaveCandidates(scan.candidates);
+    logger.info(
+      {
+        series: scan.series,
+        freshSeries: scan.freshSeries,
+        candidates: scan.candidates.length,
+        recorded: paperStatuses.recorded,
+        duplicates: paperStatuses.duplicates,
+        blocked: paperStatuses.blocked,
+      },
+      "Elliott wave scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Elliott wave scan cycle skipped");
+  } finally {
+    waveScanRunning = false;
+  }
 }
 
 async function intradayText() {
@@ -2912,6 +3151,9 @@ async function handleMessage(chatId: number, text: string) {
   if (isIntradayRequest(text)) {
     return intradayText();
   }
+  if (isWavesRequest(text)) {
+    return wavesText();
+  }
   if (normalizedText === "цены" || normalizedText === "котировка") {
     return marketText();
   }
@@ -3031,6 +3273,9 @@ export function startTelegramBot() {
   const intradayScanTimer = setInterval(() => {
     void runIntradayScanCycle();
   }, INTRADAY_SCAN_INTERVAL_MS);
+  const waveScanTimer = setInterval(() => {
+    void runWaveScanCycle();
+  }, WAVE_SCAN_INTERVAL_MS);
   const paperEvaluationTimer = setInterval(() => {
     if (paperEvaluationRunning) return;
     paperEvaluationRunning = true;
@@ -3047,6 +3292,7 @@ export function startTelegramBot() {
     running = false;
     controller.abort();
     clearInterval(intradayScanTimer);
+    clearInterval(waveScanTimer);
     clearInterval(paperEvaluationTimer);
   };
 
@@ -3060,6 +3306,7 @@ export function startTelegramBot() {
           { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
           { command: "intraday", description: "Внутридневной сканер IMOEX" },
+          { command: "waves", description: "Волны Эллиотта и Fibonacci" },
           { command: "top", description: "Лучшие сигналы" },
           { command: "analogs", description: "Аналогичные рыночные ситуации" },
           { command: "accuracy", description: "Точность paper-сигналов" },
@@ -3069,6 +3316,7 @@ export function startTelegramBot() {
       );
       logger.info({ username: me.username ?? "unknown" }, "Telegram bot connected");
       void runIntradayScanCycle();
+      void runWaveScanCycle();
 
       while (running) {
         try {
