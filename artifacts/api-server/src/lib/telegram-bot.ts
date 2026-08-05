@@ -3741,6 +3741,7 @@ async function smartMoneyText(chatId?: number) {
     await ensureSmartMoneyHigherTimeframes(false);
     const scan = await scanSmartMoney();
     const records = await recordSmartMoneyCandidates(scan.candidates);
+    await notifySmartMoneyCandidates(records.recordedCandidates);
     const blocks = scan.candidates.map((candidate, index) =>
       smartMoneyCandidateText(candidate, index + 1),
     );
