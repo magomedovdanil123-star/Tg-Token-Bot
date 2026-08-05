@@ -14,3 +14,4 @@
 - [Commodity Smart Money](commodity-smart-money.md) — commodities use Yahoo futures, separate source/statistics, own market regime, and a three-minute Telegram monitor.
 - [Money Test control group](money-test-control.md) — experimental intraday filters and two-minute position monitoring must stay isolated from production Smart Money.
 - [Telegram alert subscriptions](telegram-alert-subscriptions.md) — background scanners need an explicit subscribed chat set; scanning alone does not deliver alerts.
+- [Timeweb deployment](timeweb-deployment.md) — Timeweb host has port 8080 occupied; Invest AI uses 8099 and needs a GitHub deploy key plus Telegram token.
