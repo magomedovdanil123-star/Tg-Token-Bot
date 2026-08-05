@@ -10,3 +10,4 @@
 - [Smart Money causality](smart-money-causality.md) — exclude open aggregate bars, persist execution timeframe, and refresh stale HTF data before SMC scans.
 - [Smart Money filtering](smart-money-filtering.md) — keep SMC filters orthogonal and explainable; tune thresholds from rejection stats and out-of-sample results.
 - [Company analysis output](company-analysis-output.md) — company selection must return the same Smart Money candidate format; send nothing when no entry passes.
+- [Smart Money backtest](smart-money-backtest.md) — evaluate the unchanged SMC candidate rules separately with fixed portfolio sizing, costs, and a five-position cap.

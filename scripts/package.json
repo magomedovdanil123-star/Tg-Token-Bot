@@ -14,6 +14,7 @@
     "discover-professional-patterns": "tsx ./src/discover-professional-patterns.ts",
     "refresh-levels-correlations": "tsx ./src/refresh-levels-correlations.ts",
     "research-refresh": "tsx ./src/research-refresh.ts",
+    "smart-money-backtest": "tsx ./src/smart-money-backtest.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
