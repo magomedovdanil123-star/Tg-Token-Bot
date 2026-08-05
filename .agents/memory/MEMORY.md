@@ -11,3 +11,4 @@
 - [Smart Money filtering](smart-money-filtering.md) — keep SMC filters orthogonal and explainable; tune thresholds from rejection stats and out-of-sample results.
 - [Company analysis output](company-analysis-output.md) — company selection must return the same Smart Money candidate format; send nothing when no entry passes.
 - [Smart Money backtest](smart-money-backtest.md) — evaluate the unchanged SMC candidate rules separately with fixed portfolio sizing, costs, and a five-position cap.
+- [Commodity Smart Money](commodity-smart-money.md) — commodities use Yahoo futures, separate source/statistics, own market regime, and a three-minute Telegram monitor.

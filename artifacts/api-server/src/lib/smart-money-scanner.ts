@@ -1,4 +1,4 @@
-import { desc, eq, or, sql } from "drizzle-orm";
+import { desc, eq, inArray, or, sql } from "drizzle-orm";
 import { db, moexTickers } from "@workspace/db";
 
 type Direction = "BUY" | "SELL";
@@ -34,6 +34,9 @@ type Accumulation = {
 
 type MarketRegime = "BUY" | "SELL" | "NEUTRAL";
 const ROUND_TRIP_COST_PERCENT = 0.2;
+export const COMMODITY_TICKERS = ["XAUUSD", "XAGUSD", "BRENT"] as const;
+export type SmartMoneyUniverse = "imoex" | "commodities";
+export type SmartMoneySource = "smartmoney" | "commodity-smartmoney";
 type SmartMoneyFilterStats = Record<
   | "cooldown"
   | "insufficientHistory"
@@ -100,6 +103,12 @@ export type SmartMoneyTickerDiagnostic = {
   score: number | null;
   threshold: number;
   reasons: string[];
+};
+
+export type SmartMoneyScanOptions = {
+  universe?: SmartMoneyUniverse;
+  source?: SmartMoneySource;
+  skipCooldown?: boolean;
 };
 
 function finite(value: unknown): value is number {
@@ -424,7 +433,7 @@ function breakoutQuality(
   };
 }
 
-async function getAdaptiveThreshold() {
+async function getAdaptiveThreshold(source: SmartMoneySource) {
   const result = await db.execute(sql`
     SELECT
       COUNT(*)::int AS total,
@@ -432,7 +441,7 @@ async function getAdaptiveThreshold() {
         WHERE outcome IN ('TP', 'MANUAL_WIN', 'TIMEOUT_WIN')
       )::int AS wins
     FROM signals_history
-    WHERE metadata ->> 'source' = 'smartmoney'
+      WHERE metadata ->> 'source' = ${source}
       AND outcome IS NOT NULL
       AND generated_at >= NOW() - INTERVAL '90 days'
   `);
@@ -464,22 +473,35 @@ function rowsFromResult(result: { rows: unknown[] }) {
     .filter((row) => Number.isFinite(row.timestamp.getTime()) && finite(row.close));
 }
 
-export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMoneyScan> {
+export async function scanSmartMoney(
+  requestedTicker?: string,
+  options: SmartMoneyScanOptions = {},
+): Promise<SmartMoneyScan> {
+  const universe = options.universe ?? "imoex";
+  const source = options.source ?? "smartmoney";
   const generatedAt = new Date();
-  const adaptiveThreshold = await getAdaptiveThreshold();
+  const adaptiveThreshold = await getAdaptiveThreshold(source);
   const tickerRows = await db
     .select({ ticker: moexTickers.secid })
     .from(moexTickers)
     .where(
-      requestedTicker
-        ? or(eq(moexTickers.isActive, true), eq(moexTickers.secid, requestedTicker))
-        : eq(moexTickers.isActive, true),
+      universe === "commodities"
+        ? requestedTicker
+          ? inArray(moexTickers.secid, [requestedTicker])
+          : inArray(moexTickers.secid, [...COMMODITY_TICKERS])
+        : requestedTicker
+          ? or(eq(moexTickers.isActive, true), eq(moexTickers.secid, requestedTicker))
+          : eq(moexTickers.isActive, true),
     )
     .orderBy(desc(moexTickers.rank));
   const activeTickers = tickerRows.map((row) => row.ticker).filter((ticker) => ticker !== "IMOEX");
-  const tickers = requestedTicker
-    ? activeTickers.filter((ticker) => ticker === requestedTicker)
-    : activeTickers;
+  const tickers = universe === "commodities"
+    ? activeTickers.filter((ticker) =>
+        COMMODITY_TICKERS.includes(ticker as (typeof COMMODITY_TICKERS)[number]),
+      )
+    : requestedTicker
+      ? activeTickers.filter((ticker) => ticker === requestedTicker)
+      : activeTickers;
   const result = await db.execute(sql`
     SELECT ticker, timeframe, timestamp, open, high, low, close, volume
     FROM (
@@ -499,7 +521,7 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
   const cooldownResult = await db.execute(sql`
     SELECT DISTINCT ticker
     FROM signals_history
-    WHERE metadata ->> 'source' = 'smartmoney'
+    WHERE metadata ->> 'source' = ${source}
       AND generated_at >= NOW() - INTERVAL '90 minutes'
   `);
   const cooldownTickers = new Set(
@@ -533,7 +555,7 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
     belowThreshold: 0,
   };
   for (const ticker of tickers) {
-    if (cooldownTickers.has(ticker)) {
+    if (!options.skipCooldown && cooldownTickers.has(ticker)) {
       cooldownSkipped += 1;
       filterStats.cooldown += 1;
       diagnostics.push({
@@ -596,6 +618,9 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
     }
 
     const direction = levels.direction;
+    const currentMarketRegime = universe === "commodities"
+      ? getMarketRegime(oneHour)
+      : marketRegime;
     const liquidity = liquiditySignals(primary, current, levels);
     const block = orderBlock(primary, direction, levels);
     const fvg = fairValueGap(primary, direction);
@@ -641,7 +666,11 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
     score += trendAligned ? 10 : 0;
     if (trendOpposed) score -= 10;
     score += breakoutMetrics.impulseConfirmed ? 8 : 0;
-    score += marketRegime === direction ? 8 : marketRegime === "NEUTRAL" ? 0 : -12;
+    score += currentMarketRegime === direction
+      ? 8
+      : currentMarketRegime === "NEUTRAL"
+        ? 0
+        : -12;
     if (rangeToAtr <= 2.5) score += 4;
     if (rangeToAtr > 3) score -= 8;
 
@@ -669,7 +698,7 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
       !volumeConfirmed ||
       !levels.choch && !(breakoutMetrics.impulseConfirmed && trendAligned) ||
       !trendAligned ||
-      (marketRegime !== "NEUTRAL" && marketRegime !== direction) ||
+      (currentMarketRegime !== "NEUTRAL" && currentMarketRegime !== direction) ||
       !breakoutMetrics.impulseConfirmed ||
       rangeToAtr > 3.5 ||
       netRewardRisk < 1.65 ||
@@ -683,8 +712,8 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
           ? "Нет CHoCH и нет альтернативного подтверждения: качественный BOS + HTF alignment."
           : null,
         !trendAligned ? "Недостаточно согласования старших таймфреймов: нужно минимум 2 направления." : null,
-        marketRegime !== "NEUTRAL" && marketRegime !== direction
-          ? `Конфликт с режимом IMOEX: ${marketRegime}.`
+        currentMarketRegime !== "NEUTRAL" && currentMarketRegime !== direction
+          ? `Конфликт с режимом рынка: ${currentMarketRegime}.`
           : null,
         !breakoutMetrics.impulseConfirmed ? "Импульс BOS слабый или закрытие недостаточно далеко за уровнем." : null,
         rangeToAtr > 3.5 ? `Сигнальная свеча слишком большая: ${rangeToAtr.toFixed(2)} ATR.` : null,
@@ -706,7 +735,7 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
         filterStats.noChoch += 1;
       }
       if (!trendAligned) filterStats.noHTFAlignment += 1;
-      if (marketRegime !== "NEUTRAL" && marketRegime !== direction) {
+      if (currentMarketRegime !== "NEUTRAL" && currentMarketRegime !== direction) {
         filterStats.opposedMarket += 1;
       }
       if (!breakoutMetrics.impulseConfirmed) filterStats.weakImpulse += 1;
@@ -729,7 +758,7 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
       `Свеча/ATR ${rangeToAtr.toFixed(2)}x`,
       retestConfirmed ? "Retest подтверждён" : "Retest не подтверждён",
       `HTF alignment: ${agreement.join(", ")}`,
-      `Режим IMOEX: ${marketRegime === "BUY" ? "сильный рынок" : marketRegime === "SELL" ? "слабый рынок" : "нейтральный"}`,
+      `Режим рынка: ${currentMarketRegime === "BUY" ? "сильный рынок" : currentMarketRegime === "SELL" ? "слабый рынок" : "нейтральный"}`,
     ];
     const chartText = chart(primary, {
       entry: current.close,
@@ -760,7 +789,7 @@ export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMon
       volumeConfirmed,
       retestConfirmed,
       higherTimeframeAgreement: agreement,
-      marketRegime,
+      marketRegime: currentMarketRegime,
       bosQuality: breakoutMetrics.quality,
       impulseConfirmed: breakoutMetrics.impulseConfirmed,
       rangeToAtr: round(rangeToAtr),

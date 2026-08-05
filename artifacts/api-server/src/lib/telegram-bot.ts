@@ -15,6 +15,7 @@ import {
   patternStatistics,
   pool,
   signalsHistory,
+  telegramCommoditySubscriptions,
 } from "@workspace/db";
 import { logger } from "./logger";
 import { scanMarketAnalogues } from "./market-analog-scanner";
@@ -41,12 +42,14 @@ const INTRADAY_BUTTON = "⚡ Внутри дня";
 const WAVES_BUTTON = "🌊 Волновой анализ";
 const WAVE_STATS_BUTTON = "📒 Статистика волн";
 const SMART_MONEY_BUTTON = "💰 Smart Money";
+const COMMODITIES_BUTTON = "🪙 Сырьё и металлы";
 const COMPANY_ANALYSIS_BUTTON = "🔎 Аналитика компании";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
 const INTRADAY_SCAN_INTERVAL_MS = 10 * 60 * 1000;
+const COMMODITY_SCAN_INTERVAL_MS = 3 * 60 * 1000;
 const WAVE_SCAN_INTERVAL_MS = 30 * 60 * 1000;
 const PAPER_COMMISSION_ONE_WAY_PERCENT = 0.05;
 const PAPER_SLIPPAGE_ONE_WAY_PERCENT = 0.05;
@@ -78,6 +81,7 @@ const TELEGRAM_MENU = {
     [INTRADAY_BUTTON],
     [WAVES_BUTTON],
     [SMART_MONEY_BUTTON],
+    [COMMODITIES_BUTTON],
     [COMPANY_ANALYSIS_BUTTON],
     [WAVE_STATS_BUTTON],
     [ACCURACY_BUTTON],
@@ -96,6 +100,31 @@ let paperEvaluationRunning = false;
 let intradayScanRunning = false;
 let waveScanRunning = false;
 let smartMoneyScanRunning = false;
+let commodityScanRunning = false;
+let latestCommodityRefresh: Promise<void> | null = null;
+let commodityNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
+const commodityChatIds = new Set<number>();
+
+async function loadCommoditySubscriptions() {
+  const subscriptions = await db
+    .select({ chatId: telegramCommoditySubscriptions.chatId })
+    .from(telegramCommoditySubscriptions);
+  for (const subscription of subscriptions) {
+    if (Number.isSafeInteger(subscription.chatId)) {
+      commodityChatIds.add(subscription.chatId);
+    }
+  }
+  logger.info({ count: commodityChatIds.size }, "Commodity Telegram subscriptions loaded");
+}
+
+async function subscribeCommodityChat(chatId: number) {
+  if (!Number.isSafeInteger(chatId)) return;
+  commodityChatIds.add(chatId);
+  await db
+    .insert(telegramCommoditySubscriptions)
+    .values({ chatId })
+    .onConflictDoNothing();
+}
 
 type PaperRecordResult = "recorded" | "duplicate" | "risk_limit";
 type TelegramMessage = {
@@ -393,7 +422,13 @@ async function recordPaperSignal(input: {
   reasons: string[];
   patternIds: number[];
   combinationIds: number[];
-  source: "telegram" | "top" | "intraday" | "wave" | "smartmoney";
+  source:
+    | "telegram"
+    | "top"
+    | "intraday"
+    | "wave"
+    | "smartmoney"
+    | "commodity-smartmoney";
   timeframe?: string;
   metadata?: Record<string, unknown>;
   bypassRiskLimits?: boolean;
@@ -415,8 +450,9 @@ async function recordPaperSignal(input: {
     .limit(1);
   if (existing.length) return "duplicate";
 
-  const riskScope = input.source === "smartmoney"
-    ? sql`AND metadata ->> 'source' = 'smartmoney'`
+  const riskScope =
+    input.source === "smartmoney" || input.source === "commodity-smartmoney"
+      ? sql`AND metadata ->> 'source' = ${input.source}`
     : sql``;
   const limits = input.bypassRiskLimits
     ? null
@@ -480,7 +516,7 @@ async function evaluatePaperSignals() {
     FROM signals_history
     WHERE outcome IS NULL
       AND metadata ->> 'paperTrading' = 'true'
-      AND COALESCE(metadata ->> 'source', '') <> 'wave'
+      AND COALESCE(metadata ->> 'source', '') NOT IN ('wave', 'commodity-smartmoney')
     ORDER BY id
     LIMIT 500
   `);
@@ -2190,6 +2226,7 @@ function helpText() {
     "/analysis WUSH — Smart Money по компании",
     "/intraday — внутридневной сканер IMOEX",
     "/smartmoney — Smart Money: SMC-сетапы с подтверждением",
+    "/commodities — золото, серебро и нефть Brent · Smart Money",
     "/waves — волны Эллиотта, ABC и Fibonacci",
     "/wave_stats — ручная статистика волновых сигналов",
     "/wave_result ID результат — записать результат сигнала",
@@ -2229,6 +2266,19 @@ function isSmartMoneyRequest(text: string) {
     normalizedText === "smart money" ||
     normalizedText === "смарт мани" ||
     normalizedText === "/smartmoney"
+  );
+}
+
+function isCommoditiesRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === COMMODITIES_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "сырьё и металлы" ||
+    normalizedText === "сырье и металлы" ||
+    normalizedText === "сырье" ||
+    normalizedText === "металлы" ||
+    normalizedText === "/commodities" ||
+    normalizedText === "/commodity"
   );
 }
 
@@ -2334,6 +2384,506 @@ function smartMoneyCandidateText(candidate: SmartMoneyCandidate, index: number) 
     "Режим: PAPER TRADING — реальные деньги не используются.",
     "Сигнал не является финансовой рекомендацией.",
   ].join("\n");
+}
+
+function commodityName(ticker: string) {
+  if (ticker === "XAUUSD") return "Золото";
+  if (ticker === "XAGUSD") return "Серебро";
+  if (ticker === "BRENT") return "Нефть Brent";
+  return ticker;
+}
+
+async function refreshCommodityData() {
+  if (latestCommodityRefresh) return latestCommodityRefresh;
+  latestCommodityRefresh = (async () => {
+    const latest = await db.execute(sql`
+      SELECT
+        COUNT(*) FILTER (WHERE timeframe = '1h')::int AS hourly_count,
+        MAX(timestamp) FILTER (WHERE timeframe = '1h') AS hourly_latest
+      FROM candles
+      WHERE ticker IN ('XAUUSD', 'XAGUSD', 'BRENT')
+    `);
+    const row = (latest.rows[0] ?? {}) as Record<string, unknown>;
+    const rawLatest = row.hourly_latest;
+    const latestTimestamp =
+      rawLatest instanceof Date ? rawLatest : rawLatest ? new Date(String(rawLatest)) : null;
+    const hourlyFresh =
+      latestTimestamp !== null &&
+      Number.isFinite(latestTimestamp.getTime()) &&
+      Date.now() - latestTimestamp.getTime() <= 3 * 60 * 60_000;
+    const timeframes = Number(row.hourly_count) >= 60 && hourlyFresh ? "1m" : "1m,1h";
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        "pnpm",
+        [
+          "--filter",
+          "@workspace/scripts",
+          "run",
+          "download-commodities",
+          "--",
+          `--timeframes=${timeframes}`,
+        ],
+        {
+          cwd: process.cwd(),
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      child.stdout.on("data", (chunk: Buffer) => {
+        logger.info({ output: chunk.toString().trim() }, "Commodity data refresh output");
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        logger.warn({ output: chunk.toString().trim() }, "Commodity data refresh error output");
+      });
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code === 0) resolve();
+        else {
+          reject(
+            new Error(
+              `Commodity refresh exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`,
+            ),
+          );
+        }
+      });
+    });
+  })().finally(() => {
+    latestCommodityRefresh = null;
+  });
+  return latestCommodityRefresh;
+}
+
+async function latestCommodityQuotes() {
+  const result = await db.execute(sql`
+    SELECT DISTINCT ON (ticker)
+      ticker, close, timestamp
+    FROM candles
+    WHERE ticker IN ('XAUUSD', 'XAGUSD', 'BRENT')
+      AND timeframe = '1m'
+    ORDER BY ticker, timestamp DESC
+  `);
+  return result.rows
+    .map((raw) => {
+      const row = raw as Record<string, unknown>;
+      return {
+        ticker: String(row.ticker),
+        close: Number(row.close),
+        timestamp: row.timestamp instanceof Date ? row.timestamp : new Date(String(row.timestamp)),
+      };
+    })
+    .filter((row) => Number.isFinite(row.close) && Number.isFinite(row.timestamp.getTime()));
+}
+
+async function recordCommodityCandidates(candidates: SmartMoneyCandidate[]) {
+  let recorded = 0;
+  let duplicates = 0;
+  let blocked = 0;
+  const recordedCandidates: SmartMoneyCandidate[] = [];
+  for (const candidate of candidates) {
+    const result = await recordPaperSignal({
+      ticker: candidate.ticker,
+      featureTimestamp: candidate.timestamp,
+      direction: candidate.direction,
+      confidence: candidate.score,
+      entryPrice: candidate.entryPrice,
+      stopPrice: candidate.stopPrice,
+      targetPrice: candidate.takeProfit2,
+      horizonMinutes: 360,
+      reasons: candidate.reasons,
+      patternIds: [],
+      combinationIds: [],
+      source: "commodity-smartmoney",
+      timeframe: "15m",
+      bypassRiskLimits: true,
+      metadata: {
+        smartMoney: true,
+        commodity: true,
+        timeframe: "15m",
+        setupTimeframe: "15m",
+        executionTimeframe: "1m",
+        strategy: "SMC-Accumulation-BOS-CHoCH-Commodities",
+        probability: candidate.probability,
+        adaptiveThreshold: candidate.threshold,
+        rewardRisk: candidate.rewardRisk,
+        netRewardRisk: candidate.netRewardRisk,
+        takeProfit1: candidate.takeProfit1,
+        takeProfit2: candidate.takeProfit2,
+        takeProfit3: candidate.takeProfit3,
+        accumulation: candidate.accumulation,
+        structure: candidate.structure,
+        liquidity: candidate.liquidity,
+        orderBlock: candidate.orderBlock,
+        fairValueGap: candidate.fairValueGap,
+        volumeConfirmed: candidate.volumeConfirmed,
+        retestConfirmed: candidate.retestConfirmed,
+        higherTimeframeAgreement: candidate.higherTimeframeAgreement,
+        marketRegime: candidate.marketRegime,
+        bosQuality: candidate.bosQuality,
+        impulseConfirmed: candidate.impulseConfirmed,
+        rangeToAtr: candidate.rangeToAtr,
+        chart: candidate.chart,
+      },
+    });
+    if (result === "recorded") {
+      recorded += 1;
+      recordedCandidates.push(candidate);
+    }
+    else if (result === "duplicate") duplicates += 1;
+    else blocked += 1;
+  }
+  return { recorded, duplicates, blocked, recordedCandidates };
+}
+
+function commodityQuoteText(
+  quote: { ticker: string; close: number; timestamp: Date },
+) {
+  return `${commodityName(quote.ticker)} (${quote.ticker}): ${formatNumber(quote.close)} · ${formatDate(quote.timestamp)}`;
+}
+
+async function commoditiesText(chatId?: number): Promise<TelegramMessage> {
+  if (chatId !== undefined) await subscribeCommodityChat(chatId);
+  try {
+    await refreshCommodityData();
+    const [scan, quotes] = await Promise.all([
+      scanSmartMoney(undefined, {
+        universe: "commodities",
+        source: "commodity-smartmoney",
+      }),
+      latestCommodityQuotes(),
+    ]);
+    const records = await recordCommodityCandidates(scan.candidates);
+    const blocks = scan.candidates.map((candidate, index) =>
+      smartMoneyCandidateText(candidate, index + 1),
+    );
+    return {
+      text: [
+        "🪙 СЫРЬЁ И МЕТАЛЛЫ · SMART MONEY",
+        "",
+        "Мировые котировки:",
+        ...(quotes.length ? quotes.map(commodityQuoteText) : ["Котировки пока недоступны."]),
+        "",
+        `Проверено инструментов: ${scan.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
+        `Адаптивный минимальный рейтинг: ${formatNumber(scan.threshold, 0)}/100`,
+        "Логика: та же, что в Smart Money — накопление, BOS, CHoCH, ликвидность, Order Block, FVG, объём, HTF alignment и net R:R.",
+        `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates}`,
+        "",
+        ...(blocks.length
+          ? blocks.flatMap((block) => [block, ""])
+          : ["Свежих сетапов по золоту, серебру и Brent сейчас нет.", ""]),
+        "Мониторинг: рынок обновляется примерно каждые 3 минуты.",
+        "При развороте структуры, потере объёма, достижении цели или стопа бот отправит уведомление о сокращении или выходе.",
+        "PAPER TRADING — реальные сделки не совершаются. Не финансовая рекомендация.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  } catch (error) {
+    logger.error({ err: error }, "Commodity Smart Money scan failed");
+    return {
+      text: [
+        "🪙 СЫРЬЁ И МЕТАЛЛЫ · SMART MONEY",
+        "",
+        "Не удалось обновить мировые котировки.",
+        "Сигналы не формирую, чтобы не использовать неполные или устаревшие данные.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  }
+}
+
+type CommodityMonitorEvent = {
+  kind: "REDUCE" | "EXIT";
+  reason: string;
+  price: number;
+  timestamp: Date;
+};
+
+function commodityMonitorMessage(
+  ticker: string,
+  event: CommodityMonitorEvent,
+  direction: string,
+) {
+  const action = event.kind === "EXIT" ? "ПОЛНОСТЬЮ ВЫЙТИ" : "СОКРАТИТЬ ПОЗИЦИЮ";
+  return [
+    `🚨 СЫРЬЁ И МЕТАЛЛЫ · ${action}`,
+    "",
+    `${commodityName(ticker)} (${ticker}) · ${direction === "BUY" ? "LONG" : "SHORT"}`,
+    `Цена: ${formatNumber(event.price)}`,
+    `Причина: ${event.reason}`,
+    `Время: ${formatDate(event.timestamp)}`,
+    "",
+    event.kind === "EXIT"
+      ? "Сценарий Smart Money потерял актуальность. Для paper-позиции зафиксирована рекомендация полного выхода."
+      : "Импульс ослабевает. Для paper-позиции зафиксирована рекомендация сократить объём и подтянуть защиту.",
+    "PAPER TRADING — реальные сделки не совершаются. Не финансовая рекомендация.",
+  ].join("\n");
+}
+
+async function commodityMonitorEvent(
+  ticker: string,
+  price: number,
+  timestamp: Date,
+  direction: string,
+  metadata: Record<string, unknown>,
+  liveDirection: string | null | undefined,
+  volumeRatio: number | null,
+): Promise<CommodityMonitorEvent | null> {
+  const stop = Number(metadata.stopPrice);
+  const target1 = Number(metadata.takeProfit1);
+  const target2 = Number(metadata.takeProfit2);
+  const target3 = Number(metadata.takeProfit3);
+  const entry = Number(metadata.entryPrice);
+  const structure =
+    metadata.structure && typeof metadata.structure === "object"
+      ? (metadata.structure as Record<string, unknown>)
+      : {};
+  const structureDirection =
+    liveDirection === "BUY" || liveDirection === "SELL"
+      ? liveDirection
+      : structure.direction === "BUY" || structure.direction === "SELL"
+        ? String(structure.direction)
+        : direction;
+  if (
+    !Number.isFinite(price) ||
+    !Number.isFinite(stop) ||
+    !Number.isFinite(target1) ||
+    !Number.isFinite(target2) ||
+    !Number.isFinite(target3) ||
+    !Number.isFinite(entry)
+  ) {
+    return null;
+  }
+
+  if (direction === "BUY" && price <= stop) {
+    return { kind: "EXIT", reason: `достигнут Stop Loss ${formatNumber(stop)}`, price, timestamp };
+  }
+  if (direction === "SELL" && price >= stop) {
+    return { kind: "EXIT", reason: `достигнут Stop Loss ${formatNumber(stop)}`, price, timestamp };
+  }
+  if (liveDirection === null) {
+    return {
+      kind: "EXIT",
+      reason: "Smart Money-структура больше не подтверждается",
+      price,
+      timestamp,
+    };
+  }
+  if (liveDirection !== undefined && structureDirection !== direction) {
+    return {
+      kind: "EXIT",
+      reason: `разворот структуры: направление стало ${structureDirection === "BUY" ? "LONG" : "SHORT"}`,
+      price,
+      timestamp,
+    };
+  }
+
+  const lastEvent = String(metadata.commodityLastEvent ?? "");
+  if (volumeRatio !== null && volumeRatio < 0.65 && lastEvent !== "volume_reduce") {
+    return {
+      kind: "REDUCE",
+      reason: `объём снизился до ${formatNumber(volumeRatio, 2)}x среднего 15m объёма`,
+      price,
+      timestamp,
+    };
+  }
+  if (
+    (direction === "BUY" && price >= target3) ||
+    (direction === "SELL" && price <= target3)
+  ) {
+    if (lastEvent !== "tp3_exit") {
+      return { kind: "EXIT", reason: `достигнут Take Profit 3 ${formatNumber(target3)}`, price, timestamp };
+    }
+    return null;
+  }
+  if (
+    (direction === "BUY" && price >= target2) ||
+    (direction === "SELL" && price <= target2)
+  ) {
+    if (!["tp2_reduce", "tp3_exit"].includes(lastEvent)) {
+      return { kind: "REDUCE", reason: `достигнут Take Profit 2 ${formatNumber(target2)}`, price, timestamp };
+    }
+  }
+  if (
+    (direction === "BUY" && price >= target1) ||
+    (direction === "SELL" && price <= target1)
+  ) {
+    if (!["tp1_reduce", "tp2_reduce", "tp3_exit"].includes(lastEvent)) {
+      return { kind: "REDUCE", reason: `достигнут Take Profit 1 ${formatNumber(target1)}`, price, timestamp };
+    }
+  }
+  return null;
+}
+
+async function runCommodityPositionMonitor() {
+  const liveScan = await scanSmartMoney(undefined, {
+    universe: "commodities",
+    source: "commodity-smartmoney",
+    skipCooldown: true,
+  });
+  const liveDirections = new Map<string, string | null>(
+    liveScan.diagnostics
+      .map((item) => [item.ticker, item.direction]),
+  );
+  const active = await db.execute(sql`
+    SELECT id, ticker, direction, entry_price, stop_price, metadata
+    FROM signals_history
+    WHERE outcome IS NULL
+      AND metadata ->> 'source' = 'commodity-smartmoney'
+    ORDER BY id
+  `);
+  for (const raw of active.rows) {
+    const row = raw as Record<string, unknown>;
+    const id = Number(row.id);
+    const ticker = String(row.ticker);
+    const direction = String(row.direction);
+    const entryPrice = Number(row.entry_price);
+    const stopPrice = Number(row.stop_price);
+    const metadata =
+      row.metadata && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : {};
+    const latest = await db.execute(sql`
+      SELECT timestamp, close
+      FROM candles
+      WHERE ticker = ${ticker} AND timeframe = '1m'
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+    const candle = latest.rows[0] as Record<string, unknown> | undefined;
+    if (!candle) continue;
+    const timestamp =
+      candle.timestamp instanceof Date ? candle.timestamp : new Date(String(candle.timestamp));
+    const price = Number(candle.close);
+    if (!Number.isFinite(id) || !Number.isFinite(price) || !Number.isFinite(timestamp.getTime())) {
+      continue;
+    }
+    const volumeRows = await db.execute(sql`
+      SELECT timestamp, volume
+      FROM candles
+      WHERE ticker = ${ticker} AND timeframe = '1m'
+      ORDER BY timestamp DESC
+      LIMIT 360
+    `);
+    const volumeBuckets = new Map<number, number>();
+    for (const rawVolume of volumeRows.rows) {
+      const volumeRow = rawVolume as Record<string, unknown>;
+      const volumeTimestamp =
+        volumeRow.timestamp instanceof Date
+          ? volumeRow.timestamp
+          : new Date(String(volumeRow.timestamp));
+      const volume = Number(volumeRow.volume) || 0;
+      if (!Number.isFinite(volumeTimestamp.getTime())) continue;
+      const bucket = Math.floor(volumeTimestamp.getTime() / (15 * 60_000)) * 15 * 60_000;
+      volumeBuckets.set(bucket, (volumeBuckets.get(bucket) ?? 0) + volume);
+    }
+    const volumeValues = [...volumeBuckets.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, volume]) => volume);
+    const latestVolume = volumeValues.at(-1) ?? null;
+    const volumeBaseline = volumeValues.length > 1
+      ? volumeValues.slice(-21, -1).reduce((sum, value) => sum + value, 0) /
+        Math.min(20, volumeValues.length - 1)
+      : null;
+    const volumeRatio =
+      latestVolume !== null && volumeBaseline !== null && volumeBaseline > 0
+        ? latestVolume / volumeBaseline
+        : null;
+    const event = await commodityMonitorEvent(
+      ticker,
+      price,
+      timestamp,
+      direction,
+      {
+        ...metadata,
+        entryPrice,
+        stopPrice,
+      },
+      liveDirections.has(ticker) ? liveDirections.get(ticker) : undefined,
+      volumeRatio,
+    );
+    if (!event) continue;
+    const eventKey =
+      event.kind === "EXIT"
+        ? event.reason.includes("Take Profit 3")
+          ? "tp3_exit"
+          : "exit"
+        : event.reason.includes("Take Profit 2")
+          ? "tp2_reduce"
+        : event.reason.includes("объём")
+          ? "volume_reduce"
+          : "tp1_reduce";
+    const updated = await db.execute(sql`
+      UPDATE signals_history
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({
+        commodityLastEvent: eventKey,
+        commodityLastEventAt: event.timestamp.toISOString(),
+        commodityLastEventReason: event.reason,
+      })}::jsonb
+      WHERE id = ${id}
+        AND outcome IS NULL
+        AND COALESCE(metadata ->> 'commodityLastEvent', '') <> ${eventKey}
+      RETURNING id
+    `);
+    if (!updated.rows.length) continue;
+    if (event.kind === "EXIT") {
+      const grossOutcomePercent =
+        direction === "BUY"
+          ? ((price - entryPrice) / entryPrice) * 100
+          : ((entryPrice - price) / entryPrice) * 100;
+      await db.execute(sql`
+        UPDATE signals_history
+        SET outcome = 'EXIT',
+            outcome_percent = ${grossOutcomePercent - PAPER_TRANSACTION_COST_PERCENT},
+            outcome_at = ${timestamp}
+        WHERE id = ${id}
+          AND outcome IS NULL
+      `);
+    }
+    if (!commodityNotifier) continue;
+    const message = commodityMonitorMessage(ticker, event, direction);
+    for (const chatId of commodityChatIds) {
+      await commodityNotifier(chatId, message);
+    }
+  }
+}
+
+async function runCommodityScanCycle() {
+  if (commodityScanRunning) return;
+  commodityScanRunning = true;
+  try {
+    await refreshCommodityData();
+    const scan = await scanSmartMoney(undefined, {
+      universe: "commodities",
+      source: "commodity-smartmoney",
+    });
+    const records = await recordCommodityCandidates(scan.candidates);
+    if (commodityNotifier && records.recordedCandidates.length) {
+      for (const candidate of records.recordedCandidates) {
+        const message = [
+          "🪙 НОВЫЙ СИГНАЛ · СЫРЬЁ И МЕТАЛЛЫ",
+          "",
+          smartMoneyCandidateText(candidate, 1),
+        ].join("\n");
+        for (const chatId of commodityChatIds) {
+          await commodityNotifier(chatId, message);
+        }
+      }
+    }
+    await runCommodityPositionMonitor();
+    logger.info(
+      {
+        analyzed: scan.analyzed,
+        candidates: scan.candidates.length,
+        recorded: records.recorded,
+        duplicates: records.duplicates,
+      },
+      "Commodity Smart Money scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Commodity Smart Money scan cycle skipped");
+  } finally {
+    commodityScanRunning = false;
+  }
 }
 
 function waveHorizonMinutes(timeframe: string) {
@@ -3982,6 +4532,9 @@ async function handleMessage(chatId: number, text: string) {
   if (isSmartMoneyRequest(text)) {
     return smartMoneyText();
   }
+  if (isCommoditiesRequest(text)) {
+    return commoditiesText(chatId);
+  }
   if (isWavesRequest(text)) {
     return wavesText();
   }
@@ -4110,6 +4663,7 @@ export function startTelegramBot() {
   let offset = 0;
   const controller = new AbortController();
   const client = createTelegramClient(token);
+  commodityNotifier = client.sendMessage;
   const intradayScanTimer = setInterval(() => {
     void runIntradayScanCycle();
   }, INTRADAY_SCAN_INTERVAL_MS);
@@ -4119,6 +4673,9 @@ export function startTelegramBot() {
   const smartMoneyScanTimer = setInterval(() => {
     void runSmartMoneyScanCycle();
   }, INTRADAY_SCAN_INTERVAL_MS);
+  const commodityScanTimer = setInterval(() => {
+    void runCommodityScanCycle();
+  }, COMMODITY_SCAN_INTERVAL_MS);
   const paperEvaluationTimer = setInterval(() => {
     if (paperEvaluationRunning) return;
     paperEvaluationRunning = true;
@@ -4137,13 +4694,16 @@ export function startTelegramBot() {
     clearInterval(intradayScanTimer);
     clearInterval(waveScanTimer);
     clearInterval(smartMoneyScanTimer);
+    clearInterval(commodityScanTimer);
     clearInterval(paperEvaluationTimer);
+    commodityNotifier = null;
   };
 
   void (async () => {
     try {
       const me = await client.getMe();
       await client.deleteWebhook();
+      await loadCommoditySubscriptions();
       await client.setMyCommands(
         JSON.stringify([
           { command: "analysis", description: "Smart Money по выбранной акции" },
@@ -4152,6 +4712,7 @@ export function startTelegramBot() {
           { command: "market", description: "Состояние рынка" },
           { command: "intraday", description: "Внутридневной сканер IMOEX" },
           { command: "smartmoney", description: "Smart Money SMC-сетапы IMOEX" },
+          { command: "commodities", description: "Золото, серебро и Brent · Smart Money" },
           { command: "waves", description: "Волны Эллиотта и Fibonacci" },
           { command: "wave_stats", description: "Статистика волновых сигналов" },
           { command: "top", description: "Лучшие сигналы" },
@@ -4164,6 +4725,7 @@ export function startTelegramBot() {
       logger.info({ username: me.username ?? "unknown" }, "Telegram bot connected");
       void runIntradayScanCycle();
       void runSmartMoneyScanCycle();
+      void runCommodityScanCycle();
       void runWaveScanCycle();
 
       while (running) {

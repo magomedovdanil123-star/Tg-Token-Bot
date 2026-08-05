@@ -8,6 +8,7 @@
     "download-moex": "tsx ./src/download-moex-data.ts",
     "refresh-features": "tsx ./src/download-moex-data.ts --features-only=true",
     "download-context": "tsx ./src/download-market-context.ts",
+    "download-commodities": "tsx ./src/download-commodity-data.ts",
     "discover-patterns": "tsx ./src/research-discover.ts",
     "research-engine": "tsx ./src/research-discover.ts",
     "discover-candle-patterns": "tsx ./src/discover-candle-patterns.ts",
