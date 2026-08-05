@@ -96,6 +96,43 @@ export type ElliottScanResult = {
   generatedAt: Date;
 };
 
+export type WaveBacktestTrade = {
+  ticker: string;
+  timeframe: WaveTimeframe;
+  timestamp: Date;
+  direction: Direction;
+  scenario: string;
+  entryPrice: number;
+  targetPrice: number;
+  stopPrice: number;
+  targetPercent: number;
+  stopPercent: number;
+  confidence: number;
+  outcome: "TP" | "SL" | "TIMEOUT" | "OPEN_AT_END";
+  outcomePercent: number;
+  pnlRub: number;
+  exitTimestamp: Date;
+};
+
+export type WaveBacktestResult = {
+  periodStart: Date;
+  periodEnd: Date;
+  stakePerTrade: number;
+  totalSignals: number;
+  totalNotional: number;
+  wins: number;
+  losses: number;
+  timeouts: number;
+  openAtEnd: number;
+  winRate: number | null;
+  averageOutcomePercent: number | null;
+  profitFactor: number | null;
+  totalPnlRub: number;
+  endingBalanceRub: number;
+  maxDrawdownRub: number;
+  trades: WaveBacktestTrade[];
+};
+
 type Series = {
   ticker: string;
   timeframe: WaveTimeframe;
@@ -718,5 +755,162 @@ export async function scanElliottWaveStrategies(): Promise<ElliottScanResult> {
     candidates,
     unavailable,
     generatedAt: new Date(),
+  };
+}
+
+export async function backtestElliottWaveMonth(options?: {
+  days?: number;
+  stakePerTrade?: number;
+  asOf?: Date;
+}): Promise<WaveBacktestResult> {
+  const days = options?.days ?? 30;
+  const stakePerTrade = options?.stakePerTrade ?? 100_000;
+  const periodEnd = options?.asOf ?? new Date();
+  const periodStart = new Date(periodEnd.getTime() - days * 24 * 60 * 60_000);
+  const historyStart = new Date(periodStart.getTime() - 120 * 24 * 60 * 60_000);
+  const result = await db.execute(sql`
+    SELECT c.ticker, c.timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume
+    FROM candles c
+    INNER JOIN moex_tickers t ON t.secid = c.ticker AND t.is_active = true
+    WHERE c.timeframe IN ('30m', '1h')
+      AND c.timestamp >= ${historyStart}
+      AND c.timestamp <= ${periodEnd}
+    ORDER BY c.ticker, c.timeframe, c.timestamp
+  `);
+  const series = parseSeries(result.rows as Record<string, unknown>[]);
+  const seriesByKey = new Map(series.map((item) => [`${item.ticker}:${item.timeframe}`, item]));
+  const scanTimes = [
+    ...new Set(
+      series
+        .filter((item) => item.timeframe === "30m")
+        .flatMap((item) =>
+          item.candles
+            .filter((candle) => candle.timestamp >= periodStart && candle.timestamp <= periodEnd)
+            .map((candle) => candle.timestamp.getTime()),
+        ),
+    ),
+  ].sort((a, b) => a - b);
+  const seen = new Set<string>();
+  const trades: WaveBacktestTrade[] = [];
+
+  for (const scanTimeMs of scanTimes) {
+    const scanTime = new Date(scanTimeMs);
+    const candidates: RawCandidate[] = [];
+    for (const item of series) {
+      const available = item.candles.filter((candle) => candle.timestamp <= scanTime);
+      const latest = available.at(-1);
+      if (!latest || available.length < BACKTEST_START_BARS) continue;
+      const age = (scanTime.getTime() - latest.timestamp.getTime()) / 60_000;
+      if (age < 0 || age > MAX_AGE_MINUTES[item.timeframe]) continue;
+      const pivots = confirmedPivots(available, item.timeframe);
+      const firstCurrentIndex = Math.max(
+        BACKTEST_START_BARS,
+        available.length - CURRENT_SIGNAL_BARS[item.timeframe],
+      );
+      for (let index = firstCurrentIndex; index < available.length; index += 1) {
+        candidates.push(...detectAt(available, index, item.timeframe, pivots));
+      }
+    }
+
+    const freshCandidates = candidates
+      .filter((candidate) => candidate.timestamp >= periodStart && candidate.timestamp <= periodEnd)
+      .filter((candidate) => {
+        const key = `${candidate.ticker}:${candidate.timeframe}:${candidate.direction}:${candidate.scenario}:${candidate.timestamp.toISOString()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 5);
+
+    for (const candidate of freshCandidates) {
+      const item = seriesByKey.get(`${candidate.ticker}:${candidate.timeframe}`);
+      if (!item) continue;
+      const index = item.candles.findIndex(
+        (candle) => candle.timestamp.getTime() === candidate.timestamp.getTime(),
+      );
+      if (index < 0) continue;
+      const maxIndex = Math.min(item.candles.length - 1, index + timeframeBars(candidate.timeframe));
+      let outcome: WaveBacktestTrade["outcome"] = "OPEN_AT_END";
+      let outcomePercent: number | undefined;
+      let exitIndex = maxIndex;
+      for (let next = index + 1; next <= maxIndex; next += 1) {
+        const candle = item.candles[next];
+        const targetHit = candidate.direction === "BUY"
+          ? candle.high >= candidate.targetPrice
+          : candle.low <= candidate.targetPrice;
+        const stopHit = candidate.direction === "BUY"
+          ? candle.low <= candidate.stopPrice
+          : candle.high >= candidate.stopPrice;
+        if (targetHit || stopHit) {
+          const isWin = targetHit && !stopHit;
+          const exit = isWin ? candidate.targetPrice : candidate.stopPrice;
+          outcome = isWin ? "TP" : "SL";
+          outcomePercent = positivePct(candidate.direction, candidate.entryPrice, exit) - TRANSACTION_COST_PERCENT;
+          exitIndex = next;
+          break;
+        }
+        if (next === maxIndex && maxIndex === index + timeframeBars(candidate.timeframe)) {
+          outcome = "TIMEOUT";
+          outcomePercent = positivePct(candidate.direction, candidate.entryPrice, candle.close) - TRANSACTION_COST_PERCENT;
+        }
+      }
+      if (outcomePercent === undefined) {
+        const close = item.candles[maxIndex]?.close ?? candidate.entryPrice;
+        outcomePercent = positivePct(candidate.direction, candidate.entryPrice, close) - TRANSACTION_COST_PERCENT;
+      }
+      trades.push({
+        ticker: candidate.ticker,
+        timeframe: candidate.timeframe,
+        timestamp: candidate.timestamp,
+        direction: candidate.direction,
+        scenario: candidate.scenario,
+        entryPrice: candidate.entryPrice,
+        targetPrice: candidate.targetPrice,
+        stopPrice: candidate.stopPrice,
+        targetPercent: candidate.targetPercent,
+        stopPercent: candidate.stopPercent,
+        confidence: candidate.confidence,
+        outcome,
+        outcomePercent,
+        pnlRub: (outcomePercent / 100) * stakePerTrade,
+        exitTimestamp: item.candles[exitIndex]?.timestamp ?? candidate.timestamp,
+      });
+    }
+  }
+
+  const wins = trades.filter((trade) => trade.outcome === "TP").length;
+  const losses = trades.filter((trade) => trade.outcome === "SL").length;
+  const timeouts = trades.filter((trade) => trade.outcome === "TIMEOUT").length;
+  const openAtEnd = trades.filter((trade) => trade.outcome === "OPEN_AT_END").length;
+  const closedTrades = trades.filter((trade) => trade.outcome !== "OPEN_AT_END");
+  const positive = closedTrades.filter((trade) => trade.outcomePercent > 0).reduce((sum, trade) => sum + trade.outcomePercent, 0);
+  const negative = closedTrades.filter((trade) => trade.outcomePercent < 0).reduce((sum, trade) => sum + trade.outcomePercent, 0);
+  let equity = 0;
+  let peak = 0;
+  let maxDrawdownRub = 0;
+  for (const trade of [...trades].sort((a, b) => a.exitTimestamp.getTime() - b.exitTimestamp.getTime())) {
+    equity += trade.pnlRub;
+    peak = Math.max(peak, equity);
+    maxDrawdownRub = Math.max(maxDrawdownRub, peak - equity);
+  }
+  const totalPnlRub = trades.reduce((sum, trade) => sum + trade.pnlRub, 0);
+  return {
+    periodStart,
+    periodEnd,
+    stakePerTrade,
+    totalSignals: trades.length,
+    totalNotional: trades.length * stakePerTrade,
+    wins,
+    losses,
+    timeouts,
+    openAtEnd,
+    winRate: closedTrades.length ? (wins / closedTrades.length) * 100 : null,
+    averageOutcomePercent: trades.length ? average(trades.map((trade) => trade.outcomePercent)) : null,
+    profitFactor: negative < 0 ? positive / Math.abs(negative) : null,
+    totalPnlRub,
+    endingBalanceRub: stakePerTrade + totalPnlRub,
+    maxDrawdownRub,
+    trades: trades.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime()),
   };
 }
