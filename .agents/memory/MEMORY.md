@@ -1,4 +1,4 @@
-- [MOEX importer](moex-import.md) — MOEX ISS candles use a supported 10-minute interval here; filter ETF instruments out of the share universe.
+- [MOEX importer](moex-import.md) — MOEX ISS here supports 1m and 10m candles; 5m/15m requests can be empty, so keep fast data isolated.
 - [Research database alignment](research-database-alignment.md) — existing pattern occurrence records use `timestamp`; preserve live column names when extending the schema.
 - [Telegram bot performance](telegram-performance.md) — use indexed latest-row lookups and map reply-keyboard labels to slash-command handlers.
 - [Research engine policy](research-engine-policy.md) — active Telegram signals must come only from statistically validated auto-engine combinations, never legacy hardcoded strategies.

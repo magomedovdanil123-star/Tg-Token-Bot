@@ -22,18 +22,26 @@ type CandleRow = {
   value?: number | null;
 };
 
-const API_ROOT = "https://iss.moex.com/iss";
-// MOEX ISS provides the 10-minute source candles used by the importer.
-const TIMEFRAME = "10m";
-const INTERVAL = 10;
-const PAGE_SIZE = 500;
-const REQUEST_DELAY_MS = 120;
-
 function arg(name: string, fallback: string): string {
   const prefix = `--${name}=`;
   const value = process.argv.find((item) => item.startsWith(prefix));
   return value ? value.slice(prefix.length) : fallback;
 }
+
+const API_ROOT = "https://iss.moex.com/iss";
+const TIMEFRAME = arg("timeframe", "10m");
+const INTERVAL_BY_TIMEFRAME: Record<string, number> = {
+  "1m": 1,
+  "10m": 10,
+};
+const INTERVAL = INTERVAL_BY_TIMEFRAME[TIMEFRAME];
+if (!INTERVAL) {
+  throw new Error(`Неподдерживаемый timeframe: ${TIMEFRAME}. Доступны 1m и 10m.`);
+}
+const IS_INTRADAY_TIMEFRAME = TIMEFRAME === "1m";
+const PAGE_SIZE = 500;
+const REQUEST_DELAY_MS = 120;
+const LOOKBACK_DAYS = Math.max(1, Number(arg("days", "5")) || 5);
 
 function integerArg(name: string, fallback: number): number {
   const value = Number(arg(name, String(fallback)));
@@ -711,6 +719,9 @@ async function main() {
   }
 
   if (arg("features-only", "false") === "true") {
+    if (IS_INTRADAY_TIMEFRAME) {
+      throw new Error("Для timeframe=1m расчёт общей таблицы features отключён");
+    }
     const featuresStart = integerArg("features-start", 0);
     const featuresLimit = integerArg("features-limit", 1000);
     const requestedTicker = arg("ticker", "").trim().toUpperCase();
@@ -772,7 +783,7 @@ async function main() {
     }
 
     const end = new Date();
-    const start = new Date(end.getTime() - 5 * 24 * 60 * 60 * 1000);
+    const start = new Date(end.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
     const startDate = start.toISOString().slice(0, 10);
     const endDate = end.toISOString().slice(0, 10);
     let tickersProcessed = 0;
@@ -784,7 +795,9 @@ async function main() {
       try {
         const rows = await getCandles(ticker.secid, startDate, endDate);
         candlesLoaded += await saveCandles(rows);
-        featuresCalculated += await calculateLatestFeature(ticker.secid);
+        if (!IS_INTRADAY_TIMEFRAME) {
+          featuresCalculated += await calculateLatestFeature(ticker.secid);
+        }
         tickersProcessed += 1;
       } catch (error) {
         errors.push(
@@ -804,8 +817,10 @@ async function main() {
         "SNDX",
       );
       candlesLoaded += await saveCandles(indexRows);
-      featuresCalculated += await calculateLatestFeature("IMOEX");
-      if (indexRows.length > 0) {
+      if (!IS_INTRADAY_TIMEFRAME) {
+        featuresCalculated += await calculateLatestFeature("IMOEX");
+      }
+      if (indexRows.length > 0 && !IS_INTRADAY_TIMEFRAME) {
         await db
           .insert(marketContext)
           .values(
@@ -916,7 +931,9 @@ async function main() {
         await saveTicker(ticker, startRank + index + 1);
         const rows = await getCandles(ticker.secid, startDate, endDate);
         const inserted = await saveCandles(rows);
-        const featureCount = await calculateFeatures(ticker.secid);
+        const featureCount = IS_INTRADAY_TIMEFRAME
+          ? 0
+          : await calculateFeatures(ticker.secid);
         candlesLoaded += inserted;
         featuresCalculated += featureCount;
         tickersProcessed += 1;
@@ -952,7 +969,7 @@ async function main() {
           "SNDX",
         );
         candlesLoaded += await saveCandles(indexRows);
-        if (indexRows.length > 0) {
+        if (indexRows.length > 0 && !IS_INTRADAY_TIMEFRAME) {
           await db
             .insert(marketContext)
             .values(
@@ -967,7 +984,9 @@ async function main() {
             )
             .onConflictDoNothing({ target: marketContext.timestamp });
         }
-        featuresCalculated += await calculateFeatures("IMOEX");
+        if (!IS_INTRADAY_TIMEFRAME) {
+          featuresCalculated += await calculateFeatures("IMOEX");
+        }
         console.log(`IMOEX: ${indexRows.length} свечей`);
       } catch (error) {
         errors.push(

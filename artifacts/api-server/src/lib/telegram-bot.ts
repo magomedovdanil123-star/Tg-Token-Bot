@@ -31,7 +31,9 @@ const ACCURACY_BUTTON = "📊 Точность сигналов";
 const INTRADAY_BUTTON = "⚡ Внутри дня";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
+const INTRADAY_HORIZON_MINUTES = 60;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
+const INTRADAY_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const PAPER_COMMISSION_ONE_WAY_PERCENT = 0.05;
 const PAPER_SLIPPAGE_ONE_WAY_PERCENT = 0.05;
 const PAPER_TRANSACTION_COST_PERCENT =
@@ -68,7 +70,9 @@ const TELEGRAM_MENU = {
 };
 let researchRefreshRunning = false;
 let latestMarketRefresh: Promise<void> | null = null;
+let latestIntradayRefresh: Promise<void> | null = null;
 let paperEvaluationRunning = false;
+let intradayScanRunning = false;
 
 type PaperRecordResult = "recorded" | "duplicate" | "risk_limit";
 
@@ -360,17 +364,19 @@ async function recordPaperSignal(input: {
   reasons: string[];
   patternIds: number[];
   combinationIds: number[];
-  source: "telegram" | "top";
+  source: "telegram" | "top" | "intraday";
+  timeframe?: string;
   metadata?: Record<string, unknown>;
 }): Promise<PaperRecordResult> {
   if (input.direction === "HOLD") return "risk_limit";
+  const timeframe = input.timeframe ?? TIMEFRAME;
   const existing = await db
     .select({ id: signalsHistory.id })
     .from(signalsHistory)
     .where(
       and(
         eq(signalsHistory.ticker, input.ticker),
-        eq(signalsHistory.timeframe, TIMEFRAME),
+        eq(signalsHistory.timeframe, timeframe),
         eq(signalsHistory.candleTimestamp, input.featureTimestamp),
         eq(signalsHistory.direction, input.direction),
         sql`COALESCE(${signalsHistory.metadata}->>'source', '') = ${input.source}`,
@@ -401,7 +407,7 @@ async function recordPaperSignal(input: {
 
   await db.insert(signalsHistory).values({
     ticker: input.ticker,
-    timeframe: TIMEFRAME,
+    timeframe,
     candleTimestamp: input.featureTimestamp,
     direction: input.direction,
     confidence: input.confidence,
@@ -431,7 +437,8 @@ async function evaluatePaperSignals() {
       stop_price AS "stopPrice",
       target_price AS "targetPrice",
       horizon_minutes AS "horizonMinutes",
-      candle_timestamp AS "candleTimestamp"
+      timestamp AS "candleTimestamp",
+      metadata
     FROM signals_history
     WHERE outcome IS NULL
       AND metadata ->> 'paperTrading' = 'true'
@@ -458,6 +465,11 @@ async function evaluatePaperSignals() {
       row.candleTimestamp instanceof Date
         ? row.candleTimestamp
         : new Date(String(row.candleTimestamp));
+    const metadata =
+      row.metadata && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : {};
+    const candleTimeframe = metadata.intraday === true ? "1m" : TIMEFRAME;
     if (
       !Number.isFinite(id) ||
       !Number.isFinite(entryPrice) ||
@@ -472,7 +484,7 @@ async function evaluatePaperSignals() {
       SELECT timestamp, high, low, close
       FROM candles
       WHERE ticker = ${ticker}
-        AND timeframe = ${TIMEFRAME}
+        AND timeframe = ${candleTimeframe}
         AND timestamp > ${candleTimestamp}
         AND timestamp <= ${deadline}
       ORDER BY timestamp
@@ -2090,7 +2102,9 @@ function intradayCandidateText(candidate: IntradayCandidate, index: number) {
 
 async function intradayText() {
   try {
+    await refreshLatestIntradayData();
     const scan = await scanIntraday();
+    const paperStatuses = await recordIntradayCandidates(scan.candidates);
     const blocks = scan.candidates
       .map((candidate, index) => intradayCandidateText(candidate, index + 1))
       .filter((block): block is string => Boolean(block));
@@ -2102,6 +2116,7 @@ async function intradayText() {
       `Свежие индикаторы: ${scan.freshFeatures}`,
       `Обновлено: ${formatDate(scan.generatedAt)}`,
       "Фильтры: спред до 0,35% · оборот от 5 млн ₽ · данные не старше 30 минут",
+      `Paper-сигналов принято: ${paperStatuses.recorded} · повторов: ${paperStatuses.duplicates} · заблокировано лимитом: ${paperStatuses.blocked}`,
       "",
       blocks.length ? blocks.flatMap((block) => [block, ""]) : ["Подходящих свежих сетапов сейчас нет.", ""],
       unavailablePreview.length
@@ -2109,7 +2124,7 @@ async function intradayText() {
         : "Все активные бумаги прошли проверку свежести.",
       "",
       "Стакан и поток сделок пока не подтверждают сигнал: MOEX не отдал orderbook через публичный endpoint.",
-      "Следующий этап: 1m/5m-данные, Opening Range, пробой/ретест, VWAP-сценарии и бумажная проверка исполнения.",
+      "Используются 1m-свечи MOEX, Opening Range, VWAP, EMA, RSI, ADX и бумажная проверка исполнения.",
       "",
       "Важно: это исследовательский paper-сигнал, не финансовая рекомендация.",
     ].join("\n");
@@ -2121,6 +2136,81 @@ async function intradayText() {
       "Не удалось получить актуальные котировки MOEX.",
       "Сигналы не формирую, чтобы не использовать старые данные.",
     ].join("\n");
+  }
+}
+
+async function recordIntradayCandidates(candidates: IntradayCandidate[]) {
+  let recorded = 0;
+  let duplicates = 0;
+  let blocked = 0;
+  for (const candidate of candidates) {
+    const isLong = candidate.direction === "BUY";
+    const entry = isLong ? candidate.quote.offer : candidate.quote.bid;
+    if (entry === null || !Number.isFinite(entry)) {
+      blocked += 1;
+      continue;
+    }
+    const target = isLong
+      ? entry * (1 + candidate.targetPercent / 100)
+      : entry * (1 - candidate.targetPercent / 100);
+    const stop = isLong
+      ? entry * (1 - candidate.stopPercent / 100)
+      : entry * (1 + candidate.stopPercent / 100);
+    const result = await recordPaperSignal({
+      ticker: candidate.ticker,
+      featureTimestamp: candidate.feature.timestamp,
+      direction: candidate.direction,
+      confidence: candidate.score,
+      entryPrice: entry,
+      stopPrice: stop,
+      targetPrice: target,
+      horizonMinutes: INTRADAY_HORIZON_MINUTES,
+      reasons: candidate.reasons,
+      patternIds: [],
+      combinationIds: [],
+      source: "intraday",
+      metadata: {
+        intraday: true,
+        timeframe: "1m",
+        quoteLast: candidate.quote.last,
+        bid: candidate.quote.bid,
+        offer: candidate.quote.offer,
+        spreadPercent: candidate.spreadPercent,
+        currentChangePercent: candidate.currentChangePercent,
+        distanceToVwapPercent: candidate.distanceToVwapPercent,
+        orderBookStatus: "not_available",
+        signalValidityMinutes: 3,
+      },
+    });
+    if (result === "recorded") recorded += 1;
+    else if (result === "duplicate") duplicates += 1;
+    else blocked += 1;
+  }
+  return { recorded, duplicates, blocked };
+}
+
+async function runIntradayScanCycle() {
+  if (intradayScanRunning) return;
+  intradayScanRunning = true;
+  try {
+    await refreshLatestIntradayData();
+    const scan = await scanIntraday();
+    const paperStatuses = await recordIntradayCandidates(scan.candidates);
+    logger.info(
+      {
+        analyzed: scan.analyzed,
+        freshFeatures: scan.freshFeatures,
+        candidates: scan.candidates.length,
+        recorded: paperStatuses.recorded,
+        duplicates: paperStatuses.duplicates,
+        blocked: paperStatuses.blocked,
+      },
+      "Intraday scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Intraday scan cycle skipped");
+  } finally {
+    intradayScanRunning = false;
   }
 }
 
@@ -2413,6 +2503,51 @@ function refreshLatestMarketData() {
     latestMarketRefresh = null;
   });
   return latestMarketRefresh;
+}
+
+function refreshLatestIntradayData() {
+  if (latestIntradayRefresh) return latestIntradayRefresh;
+  latestIntradayRefresh = new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      "pnpm",
+      [
+        "--filter",
+        "@workspace/scripts",
+        "run",
+        "download-moex",
+        "--",
+        "--latest-only=true",
+        "--timeframe=1m",
+        "--days=2",
+      ],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    child.stdout.on("data", (chunk: Buffer) => {
+      logger.info({ output: chunk.toString().trim() }, "Latest intraday MOEX refresh output");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      logger.warn({ output: chunk.toString().trim() }, "Latest intraday MOEX refresh error output");
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `Актуальное обновление 1m MOEX завершилось с кодом ${code ?? "нет"}${signal ? ` (${signal})` : ""}`,
+          ),
+        );
+      }
+    });
+  }).finally(() => {
+    latestIntradayRefresh = null;
+  });
+  return latestIntradayRefresh;
 }
 
 async function imoexText() {
@@ -2893,6 +3028,9 @@ export function startTelegramBot() {
   let offset = 0;
   const controller = new AbortController();
   const client = createTelegramClient(token);
+  const intradayScanTimer = setInterval(() => {
+    void runIntradayScanCycle();
+  }, INTRADAY_SCAN_INTERVAL_MS);
   const paperEvaluationTimer = setInterval(() => {
     if (paperEvaluationRunning) return;
     paperEvaluationRunning = true;
@@ -2908,6 +3046,7 @@ export function startTelegramBot() {
   const stop = () => {
     running = false;
     controller.abort();
+    clearInterval(intradayScanTimer);
     clearInterval(paperEvaluationTimer);
   };
 
@@ -2929,6 +3068,7 @@ export function startTelegramBot() {
         ]),
       );
       logger.info({ username: me.username ?? "unknown" }, "Telegram bot connected");
+      void runIntradayScanCycle();
 
       while (running) {
         try {

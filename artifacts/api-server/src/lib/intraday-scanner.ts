@@ -1,8 +1,9 @@
 import { desc, eq, sql } from "drizzle-orm";
-import { candles, db, features, moexTickers } from "@workspace/db";
+import { db, moexTickers } from "@workspace/db";
 
 const MOEX_API = "https://iss.moex.com/iss";
-const TIMEFRAME = "10m";
+const TIMEFRAME = "1m";
+const CANDLE_LIMIT = 720;
 const MAX_FEATURE_AGE_MINUTES = 30;
 const MAX_SPREAD_PERCENT = 0.35;
 const MIN_DAY_VALUE_RUBLES = 5_000_000;
@@ -13,6 +14,16 @@ type MoexBlock = {
 };
 
 type MoexPayload = Record<string, MoexBlock>;
+
+type Candle = {
+  timestamp: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  value: number | null;
+};
 
 type Quote = {
   ticker: string;
@@ -43,6 +54,7 @@ type FeatureSnapshot = {
   acceleration: number | null;
   volume: number | null;
   avgVolume20: number | null;
+  openingRangeBreakout: "up" | "down" | null;
 };
 
 export type IntradayCandidate = {
@@ -72,6 +84,160 @@ function numberValue(value: unknown) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function average(values: number[]) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function ema(values: number[], period: number) {
+  if (values.length < period) return null;
+  const multiplier = 2 / (period + 1);
+  let current = average(values.slice(0, period));
+  if (current === null) return null;
+  for (const value of values.slice(period)) {
+    current = (value - current) * multiplier + current;
+  }
+  return current;
+}
+
+function rsi(values: number[], period = 14) {
+  if (values.length <= period) return null;
+  let gains = 0;
+  let losses = 0;
+  for (let index = 1; index <= period; index += 1) {
+    const change = values[index] - values[index - 1];
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  for (let index = period + 1; index < values.length; index += 1) {
+    const change = values[index] - values[index - 1];
+    gains = (gains * (period - 1) + Math.max(change, 0)) / period;
+    losses = (losses * (period - 1) + Math.max(-change, 0)) / period;
+  }
+  return losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+}
+
+function atr(candles: Candle[], period = 14) {
+  if (candles.length <= period) return null;
+  const ranges = candles.map((candle, index) => {
+    const previous = candles[index - 1];
+    return previous
+      ? Math.max(
+          candle.high - candle.low,
+          Math.abs(candle.high - previous.close),
+          Math.abs(candle.low - previous.close),
+        )
+      : candle.high - candle.low;
+  });
+  return average(ranges.slice(-period));
+}
+
+function adx(candles: Candle[], period = 14) {
+  if (candles.length <= period * 2) return null;
+  const trueRanges: number[] = [];
+  const positiveMoves: number[] = [];
+  const negativeMoves: number[] = [];
+  for (let index = 0; index < candles.length; index += 1) {
+    const candle = candles[index];
+    const previous = candles[index - 1];
+    if (!previous) {
+      trueRanges.push(candle.high - candle.low);
+      positiveMoves.push(0);
+      negativeMoves.push(0);
+      continue;
+    }
+    const upMove = candle.high - previous.high;
+    const downMove = previous.low - candle.low;
+    trueRanges.push(
+      Math.max(
+        candle.high - candle.low,
+        Math.abs(candle.high - previous.close),
+        Math.abs(candle.low - previous.close),
+      ),
+    );
+    positiveMoves.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    negativeMoves.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+  const dx: number[] = [];
+  for (let index = period; index < candles.length; index += 1) {
+    const tr = average(trueRanges.slice(index - period + 1, index + 1));
+    const plus = average(positiveMoves.slice(index - period + 1, index + 1));
+    const minus = average(negativeMoves.slice(index - period + 1, index + 1));
+    if (tr === null || plus === null || minus === null || tr === 0) continue;
+    const plusDi = (plus / tr) * 100;
+    const minusDi = (minus / tr) * 100;
+    const denominator = plusDi + minusDi;
+    if (denominator > 0) dx.push((Math.abs(plusDi - minusDi) / denominator) * 100);
+  }
+  return dx.length >= period ? average(dx.slice(-period)) : null;
+}
+
+function sessionKey(timestamp: Date) {
+  return timestamp.toISOString().slice(0, 10);
+}
+
+function buildFeatureSnapshot(ticker: string, candles: Candle[]): FeatureSnapshot | null {
+  if (candles.length < 60) return null;
+  const latest = candles.at(-1);
+  if (!latest) return null;
+  const closes = candles.map((candle) => candle.close);
+  const latestSession = sessionKey(latest.timestamp);
+  const sessionCandles = candles.filter((candle) => sessionKey(candle.timestamp) === latestSession);
+  const cumulativeVolume = sessionCandles.reduce((sum, candle) => sum + candle.volume, 0);
+  const cumulativeValue = sessionCandles.reduce(
+    (sum, candle) => sum + (candle.value ?? candle.close * candle.volume),
+    0,
+  );
+  const vwap = cumulativeVolume > 0 ? cumulativeValue / cumulativeVolume : null;
+  const openingRange = sessionCandles.slice(0, 15);
+  const openingHigh = openingRange.length ? Math.max(...openingRange.map((candle) => candle.high)) : null;
+  const openingLow = openingRange.length ? Math.min(...openingRange.map((candle) => candle.low)) : null;
+  const previousClose = candles.at(-2)?.close ?? null;
+  const previousPreviousClose = candles.at(-3)?.close ?? null;
+  const currentReturn = previousClose ? ((latest.close - previousClose) / previousClose) * 100 : null;
+  const previousReturn =
+    previousPreviousClose && previousClose
+      ? ((previousClose - previousPreviousClose) / previousPreviousClose) * 100
+      : null;
+  const volumeWindow = candles.slice(-20).map((candle) => candle.volume);
+  const avgVolume20 = average(volumeWindow);
+
+  return {
+    ticker,
+    timestamp: latest.timestamp,
+    close: latest.close,
+    ema20: ema(closes, 20),
+    ema50: ema(closes, 50),
+    vwap,
+    relativeVolume: avgVolume20 ? latest.volume / avgVolume20 : null,
+    rsi: rsi(closes),
+    adx: adx(candles),
+    atr: atr(candles),
+    bbWidth: (() => {
+      const window = closes.slice(-20);
+      const middle = average(window);
+      if (middle === null || middle === 0) return null;
+      const deviation = Math.sqrt(
+        average(window.map((value) => (value - middle) ** 2)) ?? 0,
+      );
+      return (deviation * 4) / middle * 100;
+    })(),
+    priceChange3:
+      candles.at(-4)?.close
+        ? ((latest.close - candles.at(-4)!.close) / candles.at(-4)!.close) * 100
+        : null,
+    acceleration:
+      currentReturn !== null && previousReturn !== null ? currentReturn - previousReturn : null,
+    volume: latest.volume,
+    avgVolume20,
+    openingRangeBreakout:
+      openingHigh !== null && latest.close > openingHigh
+        ? "up"
+        : openingLow !== null && latest.close < openingLow
+          ? "down"
+          : null,
+  };
 }
 
 function rowsFromBlock(block: MoexBlock | undefined) {
@@ -125,64 +291,45 @@ async function fetchQuotes(tickers: string[]) {
   );
 }
 
-async function getLatestFeatures() {
+async function getLatestIntradayFeatures() {
   const result = await db.execute(sql`
-    SELECT
-      t.secid AS ticker,
-      f.timestamp,
-      c.close,
-      f.ema_20 AS "ema20",
-      f.ema_50 AS "ema50",
-      f.vwap,
-      f.relative_volume AS "relativeVolume",
-      f.rsi,
-      f.adx,
-      f.atr,
-      f.bb_width AS "bbWidth",
-      f.price_change_3 AS "priceChange3",
-      f.acceleration,
-      f.volume,
-      f.avg_volume_20 AS "avgVolume20"
+    SELECT t.secid AS ticker, c.timestamp, c.open, c.high, c.low, c.close, c.volume, c.value
     FROM moex_tickers t
     CROSS JOIN LATERAL (
-      SELECT *
-      FROM features f
-      WHERE f.ticker = t.secid
-      ORDER BY f.timestamp DESC
-      LIMIT 1
-    ) f
-    INNER JOIN candles c ON c.id = f.candle_id
-      AND c.timeframe = ${TIMEFRAME}
+      SELECT timestamp, open, high, low, close, volume, value
+      FROM candles
+      WHERE ticker = t.secid
+        AND timeframe = ${TIMEFRAME}
+      ORDER BY timestamp DESC
+      LIMIT ${CANDLE_LIMIT}
+    ) c
     WHERE t.is_active = true
       AND t.secid <> 'IMOEX'
+    ORDER BY t.secid, c.timestamp
   `);
-  return new Map<string, FeatureSnapshot>(
-    result.rows.map((raw) => {
-      const row = raw as Record<string, unknown>;
-      return [
-        String(row.ticker),
-        {
-          ticker: String(row.ticker),
-          timestamp:
-            row.timestamp instanceof Date
-              ? row.timestamp
-              : new Date(String(row.timestamp)),
-          close: Number(row.close),
-          ema20: numberValue(row.ema20),
-          ema50: numberValue(row.ema50),
-          vwap: numberValue(row.vwap),
-          relativeVolume: numberValue(row.relativeVolume),
-          rsi: numberValue(row.rsi),
-          adx: numberValue(row.adx),
-          atr: numberValue(row.atr),
-          bbWidth: numberValue(row.bbWidth),
-          priceChange3: numberValue(row.priceChange3),
-          acceleration: numberValue(row.acceleration),
-          volume: numberValue(row.volume),
-          avgVolume20: numberValue(row.avgVolume20),
-        },
-      ];
-    }),
+  const grouped = new Map<string, Candle[]>();
+  for (const raw of result.rows) {
+    const row = raw as Record<string, unknown>;
+    const timestamp = row.timestamp instanceof Date ? row.timestamp : new Date(String(row.timestamp));
+    const candle: Candle = {
+      timestamp,
+      open: Number(row.open),
+      high: Number(row.high),
+      low: Number(row.low),
+      close: Number(row.close),
+      volume: Number(row.volume) || 0,
+      value: numberValue(row.value),
+    };
+    if (!Number.isFinite(timestamp.getTime()) || !Number.isFinite(candle.close)) continue;
+    const ticker = String(row.ticker);
+    const rows = grouped.get(ticker) ?? [];
+    rows.push(candle);
+    grouped.set(ticker, rows);
+  }
+  return new Map(
+    [...grouped.entries()]
+      .map(([ticker, rows]) => [ticker, buildFeatureSnapshot(ticker, rows)] as const)
+      .filter((entry): entry is readonly [string, FeatureSnapshot] => Boolean(entry[1])),
   );
 }
 
@@ -248,6 +395,21 @@ function buildCandidate(quote: Quote, feature: FeatureSnapshot): IntradayCandida
     score += 5;
     reasons.push(`ADX ${feature.adx.toFixed(1)} подтверждает движение`);
   }
+  if (
+    feature.openingRangeBreakout !== null &&
+    ((direction === "BUY" && feature.openingRangeBreakout === "up") ||
+      (direction === "SELL" && feature.openingRangeBreakout === "down"))
+  ) {
+    score += 8;
+    reasons.push(
+      feature.openingRangeBreakout === "up"
+        ? "пробой максимума Opening Range"
+        : "пробой минимума Opening Range",
+    );
+  }
+  if (feature.rsi !== null) {
+    reasons.push(`RSI ${feature.rsi.toFixed(1)}`);
+  }
   if (currentChangePercent !== null) {
     reasons.push(`текущая цена изменилась на ${currentChangePercent >= 0 ? "+" : ""}${currentChangePercent.toFixed(2)}% от последней свечи`);
   }
@@ -282,7 +444,7 @@ export async function scanIntraday(): Promise<IntradayScan> {
   const tickers = tickerRows.map((row) => row.ticker).filter((ticker) => ticker !== "IMOEX");
   const [quotes, latestFeatures] = await Promise.all([
     fetchQuotes(tickers),
-    getLatestFeatures(),
+    getLatestIntradayFeatures(),
   ]);
   const unavailable: string[] = [];
   let freshFeatures = 0;
