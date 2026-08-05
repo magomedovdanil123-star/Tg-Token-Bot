@@ -57,6 +57,8 @@ const PAPER_TRANSACTION_COST_PERCENT =
   (PAPER_COMMISSION_ONE_WAY_PERCENT + PAPER_SLIPPAGE_ONE_WAY_PERCENT) * 2;
 const PAPER_MAX_ACTIVE_SIGNALS = 5;
 const PAPER_MAX_DAILY_LOSS_PERCENT = 2;
+const SMART_MONEY_1M_MAX_AGE_MS = 15 * 60 * 1000;
+const SMART_MONEY_1H_MAX_AGE_MS = 90 * 60 * 1000;
 const AI_SCORE_WEIGHTS = {
   trend: 0.12,
   momentum: 0.1,
@@ -3245,8 +3247,8 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
 
 async function smartMoneyText() {
   try {
-    await refreshLatestIntradayData();
-    await ensureSmartMoneyHigherTimeframes();
+    await ensureSmartMoneyDataFresh();
+    await ensureSmartMoneyHigherTimeframes(false);
     const scan = await scanSmartMoney();
     const records = await recordSmartMoneyCandidates(scan.candidates);
     const blocks = scan.candidates.map((candidate, index) =>
@@ -3297,14 +3299,21 @@ async function smartMoneyText() {
   }
 }
 
-function ensureSmartMoneyHigherTimeframes() {
+function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
   if (latestSmartMoneyHigherRefresh) return latestSmartMoneyHigherRefresh;
   latestSmartMoneyHigherRefresh = (async () => {
-    if (latestWaveRefresh) await latestWaveRefresh;
+    if (waitForWaveRefresh && latestWaveRefresh) await latestWaveRefresh;
     const latest = await db.execute(sql`
-      SELECT MAX(timestamp) AS latest
-      FROM candles
-      WHERE timeframe = '1h'
+      SELECT MIN(latest) AS latest
+      FROM (
+        SELECT ticker, MAX(timestamp) AS latest
+        FROM candles
+        WHERE timeframe = '1h'
+          AND ticker IN (
+            SELECT secid FROM moex_tickers WHERE is_active = true
+          )
+        GROUP BY ticker
+      ) latest_by_ticker
     `);
     const rawLatest = (latest.rows[0] as { latest?: unknown } | undefined)?.latest;
     const latestTimestamp =
@@ -3312,7 +3321,7 @@ function ensureSmartMoneyHigherTimeframes() {
     const isFresh =
       latestTimestamp !== null &&
       Number.isFinite(latestTimestamp.getTime()) &&
-      Date.now() - latestTimestamp.getTime() <= 90 * 60_000;
+      Date.now() - latestTimestamp.getTime() <= SMART_MONEY_1H_MAX_AGE_MS;
     if (isFresh) return;
 
     await new Promise<void>((resolve, reject) => {
@@ -3357,6 +3366,48 @@ function ensureSmartMoneyHigherTimeframes() {
     latestSmartMoneyHigherRefresh = null;
   });
   return latestSmartMoneyHigherRefresh;
+}
+
+async function ensureSmartMoneyDataFresh() {
+  const latest = await db.execute(sql`
+    SELECT timeframe, MIN(latest) AS latest
+    FROM (
+      SELECT ticker, timeframe, MAX(timestamp) AS latest
+      FROM candles
+      WHERE timeframe IN ('1m', '1h')
+        AND ticker IN (
+          SELECT secid FROM moex_tickers WHERE is_active = true
+        )
+      GROUP BY ticker, timeframe
+    ) latest_by_ticker
+    GROUP BY timeframe
+  `);
+  const freshness = new Map(
+    latest.rows.map((row) => {
+      const value = row as { timeframe?: unknown; latest?: unknown };
+      const timestamp =
+        value.latest instanceof Date
+          ? value.latest
+          : value.latest
+            ? new Date(String(value.latest))
+            : null;
+      return [String(value.timeframe), timestamp] as const;
+    }),
+  );
+  const oneMinuteLatest = freshness.get("1m");
+  const oneHourLatest = freshness.get("1h");
+  const oneMinuteFresh =
+    oneMinuteLatest !== null &&
+    oneMinuteLatest !== undefined &&
+    Number.isFinite(oneMinuteLatest.getTime()) &&
+    Date.now() - oneMinuteLatest.getTime() <= SMART_MONEY_1M_MAX_AGE_MS;
+  const oneHourFresh =
+    oneHourLatest !== null &&
+    oneHourLatest !== undefined &&
+    Number.isFinite(oneHourLatest.getTime()) &&
+    Date.now() - oneHourLatest.getTime() <= SMART_MONEY_1H_MAX_AGE_MS;
+  if (oneMinuteFresh && oneHourFresh) return;
+  await refreshLatestIntradayData();
 }
 
 async function runSmartMoneyScanCycle() {
