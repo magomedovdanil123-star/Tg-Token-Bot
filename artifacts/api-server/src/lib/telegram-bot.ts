@@ -27,6 +27,7 @@ import {
 import {
   scanSmartMoney,
   type SmartMoneyCandidate,
+  type SmartMoneyTickerDiagnostic,
 } from "./smart-money-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -41,6 +42,7 @@ const INTRADAY_BUTTON = "⚡ Внутри дня";
 const WAVES_BUTTON = "🌊 Волновой анализ";
 const WAVE_STATS_BUTTON = "📒 Статистика волн";
 const SMART_MONEY_BUTTON = "💰 Smart Money";
+const COMPANY_ANALYSIS_BUTTON = "🔎 Аналитика компании";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
@@ -77,6 +79,7 @@ const TELEGRAM_MENU = {
     [INTRADAY_BUTTON],
     [WAVES_BUTTON],
     [SMART_MONEY_BUTTON],
+    [COMPANY_ANALYSIS_BUTTON],
     [WAVE_STATS_BUTTON],
     [ACCURACY_BUTTON],
     ["📈 Состояние рынка", "❓ Помощь"],
@@ -89,6 +92,7 @@ let latestMarketRefresh: Promise<void> | null = null;
 let latestIntradayRefresh: Promise<void> | null = null;
 let latestWaveRefresh: Promise<void> | null = null;
 let latestSmartMoneyHigherRefresh: Promise<void> | null = null;
+const companyAnalysisRefreshes = new Map<string, Promise<void>>();
 let paperEvaluationRunning = false;
 let intradayScanRunning = false;
 let waveScanRunning = false;
@@ -2184,6 +2188,7 @@ function helpText() {
     "INVEST AI Research Engine",
     "",
     "Команды:",
+    "/analysis WUSH — подробная аналитика компании",
     "/intraday — внутридневной сканер IMOEX",
     "/smartmoney — Smart Money: SMC-сетапы с подтверждением",
     "/waves — волны Эллиотта, ABC и Fibonacci",
@@ -2200,6 +2205,22 @@ function helpText() {
     "Данные: исторические свечи MOEX и рассчитанные признаки.",
     `Для полного обновления нажмите «${REFRESH_BUTTON}».`,
   ].join("\n");
+}
+
+function isCompanyAnalysisRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === COMPANY_ANALYSIS_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "аналитика компании" ||
+    normalizedText === "анализ компании" ||
+    normalizedText === "/analysis" ||
+    normalizedText === "/analyze" ||
+    normalizedText === "/company"
+  );
+}
+
+function normalizeTickerArgument(value: string | undefined) {
+  return value?.toUpperCase().replace(/[^A-Z0-9_]/g, "") ?? "";
 }
 
 function isSmartMoneyRequest(text: string) {
@@ -2953,6 +2974,41 @@ async function signalPicker() {
   };
 }
 
+async function companyAnalysisPicker() {
+  const rows = await db
+    .select({
+      ticker: moexTickers.secid,
+      shortName: moexTickers.shortName,
+    })
+    .from(moexTickers)
+    .where(eq(moexTickers.isActive, true))
+    .orderBy(asc(moexTickers.rank));
+  const known = new Map(rows.map((row) => [row.ticker, row]));
+  if (!known.has("WUSH")) {
+    rows.push({ ticker: "WUSH", shortName: "ВУШ Холдинг" });
+  }
+  const buttons = rows.map((row) => ({
+    text: row.shortName
+      ? `${row.ticker} — ${row.shortName.slice(0, 18)}`
+      : row.ticker,
+    callback_data: `analysis:${row.ticker}`,
+  }));
+  return {
+    text: [
+      "🔎 Выберите компанию для подробной аналитики.",
+      "",
+      "Можно также отправить команду /analysis ТИКЕР или название компании.",
+      "Например: /analysis WUSH или /analysis ВУШ",
+    ].join("\n"),
+    replyMarkup: {
+      inline_keyboard: Array.from(
+        { length: Math.ceil(buttons.length / 2) },
+        (_, index) => buttons.slice(index * 2, index * 2 + 2),
+      ),
+    },
+  };
+}
+
 async function researchResultsText() {
   const rows = await db
     .select({
@@ -3225,6 +3281,68 @@ function refreshLatestIntradayData() {
   return latestIntradayRefresh;
 }
 
+function refreshCompanyAnalysisData(ticker: string) {
+  const existing = companyAnalysisRefreshes.get(ticker);
+  if (existing) return existing;
+
+  const runImport = (timeframe: string, days: number) =>
+    new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        "pnpm",
+        [
+          "--filter",
+          "@workspace/scripts",
+          "run",
+          "download-moex",
+          "--",
+          "--latest-only=true",
+          `--timeframe=${timeframe}`,
+          `--days=${days}`,
+          `--ticker=${ticker}`,
+        ],
+        {
+          cwd: process.cwd(),
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      child.stdout.on("data", (chunk: Buffer) => {
+        logger.info(
+          { ticker, timeframe, output: chunk.toString().trim() },
+          "Company analysis MOEX refresh output",
+        );
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        logger.warn(
+          { ticker, timeframe, output: chunk.toString().trim() },
+          "Company analysis MOEX refresh error output",
+        );
+      });
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `${timeframe} refresh failed for ${ticker}: code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`,
+            ),
+          );
+        }
+      });
+    });
+
+  const refresh = (async () => {
+    await runImport("1m", 2);
+    await runImport("1h", 60);
+    await runImport("1d", 730);
+  })().finally(() => {
+    companyAnalysisRefreshes.delete(ticker);
+  });
+  companyAnalysisRefreshes.set(ticker, refresh);
+  return refresh;
+}
+
 async function imoexText() {
   const rows = await db
     .select({
@@ -3347,6 +3465,339 @@ async function signalText(ticker: string) {
     "",
     "Важно: это статистический исследовательский сигнал, не финансовая рекомендация.",
   ].join("\n");
+}
+
+type CompanyCandle = {
+  timestamp: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+type CompanyTimeframeAnalysis = {
+  label: string;
+  rows: CompanyCandle[];
+  direction: SignalDirection;
+  changePercent: number | null;
+  change20Percent: number | null;
+  ema20: number | null;
+  ema50: number | null;
+  rsi: number | null;
+  atrPercent: number | null;
+  volumeRatio: number | null;
+  support: number | null;
+  resistance: number | null;
+  structure: string;
+};
+
+function averageNumbers(values: number[]) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function emaValue(values: number[], period: number) {
+  if (values.length < period) return null;
+  let current = averageNumbers(values.slice(0, period));
+  if (current === null) return null;
+  const multiplier = 2 / (period + 1);
+  for (const value of values.slice(period)) {
+    current = (value - current) * multiplier + current;
+  }
+  return current;
+}
+
+function rsiValue(values: number[], period = 14) {
+  if (values.length <= period) return null;
+  let gains = 0;
+  let losses = 0;
+  for (let index = 1; index <= period; index += 1) {
+    const change = values[index] - values[index - 1];
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  for (let index = period + 1; index < values.length; index += 1) {
+    const change = values[index] - values[index - 1];
+    gains = (gains * (period - 1) + Math.max(change, 0)) / period;
+    losses = (losses * (period - 1) + Math.max(-change, 0)) / period;
+  }
+  return losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+}
+
+function atrValue(rows: CompanyCandle[], period = 14) {
+  if (rows.length <= period) return null;
+  const ranges = rows.slice(1).map((row, index) => {
+    const previous = rows[index];
+    return Math.max(
+      row.high - row.low,
+      Math.abs(row.high - previous.close),
+      Math.abs(row.low - previous.close),
+    );
+  });
+  return averageNumbers(ranges.slice(-period));
+}
+
+function percentChange(from: number | undefined, to: number | undefined) {
+  if (from === undefined || to === undefined || from === 0) return null;
+  return ((to - from) / from) * 100;
+}
+
+function currentWeekStart() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const mondayOffset = (start.getUTCDay() + 6) % 7;
+  start.setUTCDate(start.getUTCDate() - mondayOffset);
+  return start.getTime();
+}
+
+function aggregateCalendarBars(rows: CompanyCandle[], unit: "week" | "month") {
+  const groups = new Map<number, CompanyCandle[]>();
+  for (const row of rows) {
+    const date = new Date(row.timestamp);
+    const bucket =
+      unit === "month"
+        ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)
+        : (() => {
+            const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+            const mondayOffset = (date.getUTCDay() + 6) % 7;
+            return start - mondayOffset * 24 * 60 * 60 * 1000;
+          })();
+    const group = groups.get(bucket) ?? [];
+    group.push(row);
+    groups.set(bucket, group);
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([bucket, group]) => ({
+      timestamp: new Date(bucket),
+      open: group[0].open,
+      high: Math.max(...group.map((row) => row.high)),
+      low: Math.min(...group.map((row) => row.low)),
+      close: group.at(-1)!.close,
+      volume: group.reduce((sum, row) => sum + row.volume, 0),
+    }));
+}
+
+function companyTimeframeAnalysis(
+  label: string,
+  rows: CompanyCandle[],
+): CompanyTimeframeAnalysis {
+  const closes = rows.map((row) => row.close);
+  const latest = rows.at(-1);
+  const previous = rows.at(-2);
+  const ema20 = emaValue(closes, 20);
+  const ema50 = emaValue(closes, 50);
+  const atr = atrValue(rows);
+  const recent = rows.slice(-20);
+  const recentAverage = averageNumbers(recent.map((row) => row.close));
+  const olderAverage = averageNumbers(rows.slice(-40, -20).map((row) => row.close));
+  const direction =
+    latest && ema20 !== null && ema50 !== null
+      ? latest.close > ema20 && ema20 > ema50
+        ? "BUY"
+        : latest.close < ema20 && ema20 < ema50
+          ? "SELL"
+          : "HOLD"
+      : latest && recentAverage !== null && olderAverage !== null
+        ? recentAverage > olderAverage
+          ? "BUY"
+          : recentAverage < olderAverage
+            ? "SELL"
+            : "HOLD"
+        : "HOLD";
+  const recentHigh = recent.length ? Math.max(...recent.map((row) => row.high)) : null;
+  const recentLow = recent.length ? Math.min(...recent.map((row) => row.low)) : null;
+  const previousBlock = rows.slice(-40, -20);
+  const structure =
+    recent.length >= 10 && previousBlock.length >= 10
+      ? recentHigh !== null &&
+        previousBlock.length &&
+        recentHigh > Math.max(...previousBlock.map((row) => row.high)) &&
+        recentLow !== null &&
+        recentLow > Math.min(...previousBlock.map((row) => row.low))
+        ? "повышающиеся максимумы и минимумы"
+        : recentHigh !== null &&
+            recentLow !== null &&
+            recentHigh < Math.max(...previousBlock.map((row) => row.high)) &&
+            recentLow < Math.min(...previousBlock.map((row) => row.low))
+          ? "понижающиеся максимумы и минимумы"
+          : "боковая/смешанная структура"
+      : "недостаточно подтверждённых баров";
+  const averageVolume = averageNumbers(rows.slice(-21, -1).map((row) => row.volume));
+  return {
+    label,
+    rows,
+    direction,
+    changePercent: percentChange(previous?.close, latest?.close),
+    change20Percent: percentChange(rows.at(-21)?.close, latest?.close),
+    ema20,
+    ema50,
+    rsi: rsiValue(closes),
+    atrPercent: latest && atr !== null ? (atr / latest.close) * 100 : null,
+    volumeRatio:
+      latest && averageVolume !== null && averageVolume > 0
+        ? latest.volume / averageVolume
+        : null,
+    support: recentLow,
+    resistance: recentHigh,
+    structure,
+  };
+}
+
+async function resolveCompanyTicker(input: string) {
+  const normalized = input.trim().toUpperCase();
+  const aliases: Record<string, { ticker: string; shortName: string }> = {
+    WHOOSH: { ticker: "WUSH", shortName: "ВУШ Холдинг" },
+    ВУШ: { ticker: "WUSH", shortName: "ВУШ Холдинг" },
+    ВУШХОЛДИНГ: { ticker: "WUSH", shortName: "ВУШ Холдинг" },
+  };
+  if (aliases[normalized]) return aliases[normalized];
+  const result = await db.execute(sql`
+    SELECT secid, short_name
+    FROM moex_tickers
+    WHERE UPPER(secid) = ${normalized}
+       OR lower(coalesce(short_name, '')) LIKE lower(${"%" + input.trim() + "%"})
+    ORDER BY is_active DESC, rank NULLS LAST
+    LIMIT 1
+  `);
+  const row = result.rows[0] as { secid?: unknown; short_name?: unknown } | undefined;
+  return row?.secid
+    ? { ticker: String(row.secid), shortName: row.short_name ? String(row.short_name) : null }
+    : null;
+}
+
+async function getCompanyCandles(ticker: string, timeframe: string, limit: number) {
+  const result = await db.execute(sql`
+    SELECT timestamp, open, high, low, close, volume
+    FROM candles
+    WHERE ticker = ${ticker} AND timeframe = ${timeframe}
+    ORDER BY timestamp DESC
+    LIMIT ${limit}
+  `);
+  return result.rows
+    .map((raw) => {
+      const row = raw as Record<string, unknown>;
+      return {
+        timestamp: new Date(String(row.timestamp)),
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close),
+        volume: Number(row.volume) || 0,
+      };
+    })
+    .filter((row) => Number.isFinite(row.timestamp.getTime()) && Number.isFinite(row.close))
+    .sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime());
+}
+
+function closedCompanyRows(rows: CompanyCandle[], timeframe: "1h" | "1d") {
+  if (timeframe === "1h") return rows.length > 1 ? rows.slice(0, -1) : [];
+  const today = new Date().toISOString().slice(0, 10);
+  return rows.filter((row) => row.timestamp.toISOString().slice(0, 10) < today);
+}
+
+function companyTimeframeText(analysis: CompanyTimeframeAnalysis) {
+  const latest = analysis.rows.at(-1);
+  return [
+    `${analysis.label}: ${analysis.rows.length} закрытых свечей`,
+    latest ? `Последняя закрытая цена: ${formatNumber(latest.close)} · ${formatDate(latest.timestamp)}` : "Данные отсутствуют",
+    `Тренд: ${directionLabel(analysis.direction)} · 1 бар: ${formatNumber(analysis.changePercent)}% · 20 баров: ${formatNumber(analysis.change20Percent)}%`,
+    `EMA20: ${formatNumber(analysis.ema20)} · EMA50: ${formatNumber(analysis.ema50)} · RSI(14): ${formatNumber(analysis.rsi)}`,
+    `ATR: ${formatNumber(analysis.atrPercent)}% цены · объём к среднему: ${formatNumber(analysis.volumeRatio)}x`,
+    `Поддержка/сопротивление за 20 баров: ${formatNumber(analysis.support)} / ${formatNumber(analysis.resistance)}`,
+    `Структура: ${analysis.structure}`,
+  ].join("\n");
+}
+
+function smartMoneyDiagnosticText(
+  candidate: SmartMoneyCandidate | undefined,
+  diagnostic: SmartMoneyTickerDiagnostic | undefined,
+) {
+  if (candidate) {
+    return [
+      `✅ Smart Money: ${directionLabel(candidate.direction)} · рейтинг ${candidate.score}/100`,
+      `Вход: ${formatNumber(candidate.entryPrice)} · SL: ${formatNumber(candidate.stopPrice)} · TP2: ${formatNumber(candidate.takeProfit2)}`,
+      `Net R:R: 1:${formatNumber(candidate.netRewardRisk, 2)} · BOS: ${candidate.structure.bos ?? "—"} · CHoCH: ${candidate.structure.choch ?? "—"}`,
+      `Накопление: ${candidate.accumulation.strength} · объём: ${candidate.volumeConfirmed ? "подтверждён" : "нет"} · HTF: ${candidate.higherTimeframeAgreement.join(", ") || "нет"}`,
+      `Order Block: ${candidate.orderBlock ?? "не найден"} · FVG: ${candidate.fairValueGap ?? "не найден"}`,
+      "Сетап прошёл текущие фильтры Smart Money и допущен к paper-логике.",
+    ].join("\n");
+  }
+  return [
+    "⛔ Smart Money: готового сигнала сейчас нет.",
+    `Рейтинг: ${diagnostic?.score === null || diagnostic?.score === undefined ? "—" : `${diagnostic.score}/100`} · порог: ${diagnostic?.threshold ?? "—"}`,
+    "Причины проверки:",
+    ...(diagnostic?.reasons.length ? diagnostic.reasons.map((reason) => `• ${reason}`) : ["• недостаточно данных для диагностики"]),
+  ].join("\n");
+}
+
+async function companyAnalysisText(input: string) {
+  const resolved = await resolveCompanyTicker(input);
+  if (!resolved) {
+    if (/(sportmaster|спортмастер|sportmoney|спортмани)/i.test(input)) {
+      return [
+        "🔎 Sportmaster / Sportmoney",
+        "",
+        "Публичная акция этой компании не найдена в MOEX ISS.",
+        "Поэтому у неё нет доступных биржевых свечей 1H/1D/1W/1M для технического анализа.",
+        "Я не буду придумывать сигнал по данным, которых нет.",
+      ].join("\n");
+    }
+    return [
+      `🔎 Компания не найдена: ${input}`,
+      "",
+      "Укажите тикер акции MOEX, например /analysis WUSH.",
+      "Если компания не имеет публичной акции на MOEX, технический анализ по свечам невозможен.",
+    ].join("\n");
+  }
+  const { ticker, shortName } = resolved;
+  try {
+    await refreshCompanyAnalysisData(ticker);
+    const hourly = closedCompanyRows(await getCompanyCandles(ticker, "1h", 2500), "1h");
+    const daily = closedCompanyRows(await getCompanyCandles(ticker, "1d", 900), "1d");
+    const weekly = aggregateCalendarBars(daily, "week").filter((row) => row.timestamp.getTime() < currentWeekStart());
+    const monthly = aggregateCalendarBars(daily, "month").filter((row) => {
+      const now = new Date();
+      return row.timestamp.getUTCFullYear() < now.getUTCFullYear() ||
+        (row.timestamp.getUTCFullYear() === now.getUTCFullYear() &&
+          row.timestamp.getUTCMonth() < now.getUTCMonth());
+    });
+    const analyses = [
+      companyTimeframeAnalysis("1H", hourly),
+      companyTimeframeAnalysis("1D", daily),
+      companyTimeframeAnalysis("1W", weekly),
+      companyTimeframeAnalysis("1M", monthly),
+    ];
+    const smartScan = await scanSmartMoney(ticker);
+    const candidate = smartScan.candidates.find((item) => item.ticker === ticker);
+    const diagnostic = smartScan.diagnostics.find((item) => item.ticker === ticker);
+    const technicalDirection = analyses.find((item) => item.label === "1D")?.direction ?? "HOLD";
+    return [
+      `🔎 АНАЛИТИКА КОМПАНИИ · ${ticker}`,
+      shortName ? `${shortName}` : "",
+      "",
+      "Текущий технический срез по закрытым свечам:",
+      ...analyses.flatMap((analysis) => [companyTimeframeText(analysis), ""]),
+      `Сводное направление по 1D: ${directionLabel(technicalDirection)}`,
+      "",
+      smartMoneyDiagnosticText(candidate, diagnostic),
+      "",
+      `Проверка SMC: 1m execution · сетап 15m · HTF 1H/4H/1D · дополнительно показаны 1W/1M.`,
+      "Недельный и месячный контекст не добавлен как новый блокирующий фильтр, чтобы не менять утверждённую логику Smart Money.",
+      "Все расчёты выполнены по сохранённым свечам MOEX; незакрытые бары исключены.",
+      "",
+      "Режим: PAPER TRADING — реальные сделки не совершаются.",
+      "Это исследовательская аналитика, не финансовая рекомендация.",
+    ].filter(Boolean).join("\n");
+  } catch (error) {
+    logger.error({ err: error, ticker }, "Company analysis failed");
+    return [
+      `🔎 Аналитика ${ticker}`,
+      "",
+      "Не удалось обновить данные или собрать отчёт.",
+      "Сигнал не формирую, чтобы не использовать неполные свечи.",
+    ].join("\n");
+  }
 }
 
 async function marketText() {
@@ -3584,6 +4035,19 @@ async function handleMessage(chatId: number, text: string) {
   if (normalizedCommand === "/market") {
     return marketText();
   }
+  if (isCompanyAnalysisRequest(text)) {
+    return companyAnalysisPicker();
+  }
+  if (
+    normalizedCommand === "/analysis" ||
+    normalizedCommand === "/analyze" ||
+    normalizedCommand === "/company"
+  ) {
+    const tickerOrName = trimmedText.split(/\s+/).slice(1).join(" ").trim();
+    return tickerOrName
+      ? companyAnalysisText(tickerOrName)
+      : companyAnalysisPicker();
+  }
   if (isIntradayRequest(text)) {
     return intradayText();
   }
@@ -3754,6 +4218,7 @@ export function startTelegramBot() {
       await client.deleteWebhook();
       await client.setMyCommands(
         JSON.stringify([
+          { command: "analysis", description: "Аналитика компании по таймфреймам" },
           { command: "signal", description: "Сигнал по тикеру" },
           { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
@@ -3793,6 +4258,8 @@ export function startTelegramBot() {
                   callback.id,
                   callbackData.startsWith("signal:")
                     ? "Анализирую акцию..."
+                    : callbackData.startsWith("analysis:")
+                      ? "Собираю аналитику по закрытым свечам..."
                     : callbackData.startsWith("wave:")
                       ? "Сохраняю результат волнового сигнала..."
                     : undefined,
@@ -3805,6 +4272,15 @@ export function startTelegramBot() {
                   const response = await signalText(ticker);
                   await client.sendMessage(callbackChatId, response);
                   logger.info({ ticker }, "Telegram ticker signal sent");
+                }
+                if (callbackChatId && callbackData.startsWith("analysis:")) {
+                  const ticker = callbackData
+                    .slice("analysis:".length)
+                    .toUpperCase()
+                    .replace(/[^A-Z0-9_]/g, "");
+                  const response = await companyAnalysisText(ticker);
+                  await client.sendMessage(callbackChatId, response);
+                  logger.info({ ticker }, "Telegram company analysis sent");
                 }
                 if (callbackChatId && callbackData.startsWith("wave:")) {
                   const [, result, rawId] = callbackData.split(":");

@@ -35,10 +35,11 @@ const INTERVAL_BY_TIMEFRAME: Record<string, number> = {
   "10m": 10,
   "30m": 30,
   "1h": 60,
+  "1d": 24,
 };
 const INTERVAL = INTERVAL_BY_TIMEFRAME[TIMEFRAME];
 if (!INTERVAL) {
-  throw new Error(`Неподдерживаемый timeframe: ${TIMEFRAME}. Доступны 1m, 10m, 30m и 1h.`);
+  throw new Error(`Неподдерживаемый timeframe: ${TIMEFRAME}. Доступны 1m, 10m, 30m, 1h и 1d.`);
 }
 const IS_FEATURE_TIMEFRAME = TIMEFRAME === "10m";
 const IS_RAW_ONLY_TIMEFRAME = !IS_FEATURE_TIMEFRAME;
@@ -760,6 +761,7 @@ async function saveTicker(
     capitalization?: number;
   },
   rank: number,
+  active = true,
 ) {
   await db
     .insert(moexTickers)
@@ -775,7 +777,7 @@ async function saveTicker(
         shortName: ticker.shortName,
         capitalization: ticker.capitalization,
         rank,
-        isActive: true,
+        isActive: active,
         updatedAt: new Date(),
       },
     });
@@ -856,10 +858,22 @@ async function main() {
     if (allTickers.length === 0) {
       throw new Error("MOEX вернул пустой состав IMOEX; быстрый импорт остановлен");
     }
-    await db.update(moexTickers).set({ isActive: false });
-    for (let index = 0; index < allTickers.length; index += 1) {
-      await saveTicker(allTickers[index], index + 1);
+    const requestedTicker = arg("ticker", "").trim().toUpperCase();
+    if (!requestedTicker) {
+      await db.update(moexTickers).set({ isActive: false });
+      for (let index = 0; index < allTickers.length; index += 1) {
+        await saveTicker(allTickers[index], index + 1);
+      }
     }
+    const selectedTickers = requestedTicker
+      ? [
+          allTickers.find((ticker) => ticker.secid === requestedTicker) ?? {
+            secid: requestedTicker,
+            shortName: null,
+            capitalization: undefined,
+          },
+        ]
+      : allTickers;
 
     const end = new Date();
     const start = new Date(end.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
@@ -870,8 +884,11 @@ async function main() {
     let featuresCalculated = 0;
     const errors: string[] = [];
 
-    for (const ticker of allTickers) {
+    for (const ticker of selectedTickers) {
       try {
+        if (requestedTicker) {
+          await saveTicker(ticker, 0, false);
+        }
         const rows = await loadTimeframeCandles(ticker.secid, startDate, endDate);
         candlesLoaded += await saveCandles(rows);
         if (IS_FEATURE_TIMEFRAME) {

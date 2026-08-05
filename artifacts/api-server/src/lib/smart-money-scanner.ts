@@ -1,4 +1,4 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { desc, eq, or, sql } from "drizzle-orm";
 import { db, moexTickers } from "@workspace/db";
 
 type Direction = "BUY" | "SELL";
@@ -90,6 +90,16 @@ export type SmartMoneyScan = {
   threshold: number;
   cooldownSkipped: number;
   filterStats: SmartMoneyFilterStats;
+  diagnostics: SmartMoneyTickerDiagnostic[];
+};
+
+export type SmartMoneyTickerDiagnostic = {
+  ticker: string;
+  passed: boolean;
+  direction: Direction | null;
+  score: number | null;
+  threshold: number;
+  reasons: string[];
 };
 
 function finite(value: unknown): value is number {
@@ -454,15 +464,22 @@ function rowsFromResult(result: { rows: unknown[] }) {
     .filter((row) => Number.isFinite(row.timestamp.getTime()) && finite(row.close));
 }
 
-export async function scanSmartMoney(): Promise<SmartMoneyScan> {
+export async function scanSmartMoney(requestedTicker?: string): Promise<SmartMoneyScan> {
   const generatedAt = new Date();
   const adaptiveThreshold = await getAdaptiveThreshold();
   const tickerRows = await db
     .select({ ticker: moexTickers.secid })
     .from(moexTickers)
-    .where(eq(moexTickers.isActive, true))
+    .where(
+      requestedTicker
+        ? or(eq(moexTickers.isActive, true), eq(moexTickers.secid, requestedTicker))
+        : eq(moexTickers.isActive, true),
+    )
     .orderBy(desc(moexTickers.rank));
-  const tickers = tickerRows.map((row) => row.ticker).filter((ticker) => ticker !== "IMOEX");
+  const activeTickers = tickerRows.map((row) => row.ticker).filter((ticker) => ticker !== "IMOEX");
+  const tickers = requestedTicker
+    ? activeTickers.filter((ticker) => ticker === requestedTicker)
+    : activeTickers;
   const result = await db.execute(sql`
     SELECT ticker, timeframe, timestamp, open, high, low, close, volume
     FROM (
@@ -498,6 +515,7 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
 
   const candidates: SmartMoneyCandidate[] = [];
   const unavailable: string[] = [];
+  const diagnostics: SmartMoneyTickerDiagnostic[] = [];
   let cooldownSkipped = 0;
   const filterStats: SmartMoneyFilterStats = {
     cooldown: 0,
@@ -518,6 +536,14 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     if (cooldownTickers.has(ticker)) {
       cooldownSkipped += 1;
       filterStats.cooldown += 1;
+      diagnostics.push({
+        ticker,
+        passed: false,
+        direction: null,
+        score: null,
+        threshold: adaptiveThreshold,
+        reasons: ["Тикер находится в 90-минутном cooldown после предыдущего SMC-сигнала."],
+      });
       continue;
     }
     const series = byTicker.get(ticker)!;
@@ -529,6 +555,16 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     if (primary.length < 60 || oneHour.length < 20) {
       unavailable.push(`${ticker}: недостаточно 1m/1h свечей`);
       filterStats.insufficientHistory += 1;
+      diagnostics.push({
+        ticker,
+        passed: false,
+        direction: null,
+        score: null,
+        threshold: adaptiveThreshold,
+        reasons: [
+          `Недостаточно истории: 1m закрытых свечей ${primary.length}/60, 1H закрытых свечей ${oneHour.length}/20.`,
+        ],
+      });
       continue;
     }
     const current = primary.at(-1)!;
@@ -536,10 +572,26 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     const range = accumulation(primary);
     if (!range) {
       filterStats.noAccumulation += 1;
+      diagnostics.push({
+        ticker,
+        passed: false,
+        direction: null,
+        score: null,
+        threshold: adaptiveThreshold,
+        reasons: ["Недостаточно данных для проверки накопления."],
+      });
       continue;
     }
     if (!levels.direction) {
       filterStats.noStructure += 1;
+      diagnostics.push({
+        ticker,
+        passed: false,
+        direction: null,
+        score: null,
+        threshold: adaptiveThreshold,
+        reasons: ["Не определено направленное движение структуры по последним подтверждённым swing high/low."],
+      });
       continue;
     }
 
@@ -623,6 +675,30 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
       netRewardRisk < 1.65 ||
       score < threshold;
     if (rejected) {
+      const diagnosticReasons = [
+        range.strength === "Weak" ? `Накопление слабое: ${range.strength}.` : null,
+        !breakout ? "Нет закрытого пробоя swing-уровня (BOS)." : null,
+        !volumeConfirmed ? "Объём не подтверждает импульс (меньше 1.2x среднего)." : null,
+        !levels.choch && !(breakoutMetrics.impulseConfirmed && trendAligned)
+          ? "Нет CHoCH и нет альтернативного подтверждения: качественный BOS + HTF alignment."
+          : null,
+        !trendAligned ? "Недостаточно согласования старших таймфреймов: нужно минимум 2 направления." : null,
+        marketRegime !== "NEUTRAL" && marketRegime !== direction
+          ? `Конфликт с режимом IMOEX: ${marketRegime}.`
+          : null,
+        !breakoutMetrics.impulseConfirmed ? "Импульс BOS слабый или закрытие недостаточно далеко за уровнем." : null,
+        rangeToAtr > 3.5 ? `Сигнальная свеча слишком большая: ${rangeToAtr.toFixed(2)} ATR.` : null,
+        netRewardRisk < 1.65 ? `Низкий net R:R после издержек: ${netRewardRisk.toFixed(2)}.` : null,
+        score < threshold ? `Рейтинг ${Math.round(score)} ниже порога ${threshold}.` : null,
+      ].filter((reason): reason is string => Boolean(reason));
+      diagnostics.push({
+        ticker,
+        passed: false,
+        direction,
+        score: Math.round(score),
+        threshold,
+        reasons: diagnosticReasons,
+      });
       if (range.strength === "Weak") filterStats.noAccumulation += 1;
       if (!breakout) filterStats.noBreakout += 1;
       if (!volumeConfirmed) filterStats.noVolume += 1;
@@ -692,6 +768,14 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
       chart: chartText,
       timestamp: current.timestamp,
     });
+    diagnostics.push({
+      ticker,
+      passed: true,
+      direction,
+      score: Math.min(100, Math.round(score)),
+      threshold,
+      reasons: ["Все фильтры Smart Money пройдены; сетап допущен к paper-сигналу."],
+    });
   }
   candidates.sort((left, right) => right.score - left.score);
   return {
@@ -702,5 +786,6 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     threshold: adaptiveThreshold,
     cooldownSkipped,
     filterStats,
+    diagnostics,
   };
 }
