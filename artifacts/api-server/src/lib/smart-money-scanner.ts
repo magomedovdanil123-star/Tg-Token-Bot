@@ -32,6 +32,25 @@ type Accumulation = {
   volumeRatio: number;
 };
 
+type MarketRegime = "BUY" | "SELL" | "NEUTRAL";
+const ROUND_TRIP_COST_PERCENT = 0.2;
+type SmartMoneyFilterStats = Record<
+  | "cooldown"
+  | "insufficientHistory"
+  | "noAccumulation"
+  | "noStructure"
+  | "noBreakout"
+  | "noVolume"
+  | "noChoch"
+  | "noHTFAlignment"
+  | "opposedMarket"
+  | "weakImpulse"
+  | "oversizedCandle"
+  | "lowNetRewardRisk"
+  | "belowThreshold",
+  number
+>;
+
 export type SmartMoneyCandidate = {
   ticker: string;
   direction: Direction;
@@ -45,6 +64,7 @@ export type SmartMoneyCandidate = {
   takeProfit2: number;
   takeProfit3: number;
   rewardRisk: number;
+  netRewardRisk: number;
   accumulation: Accumulation;
   structure: Structure;
   liquidity: string[];
@@ -53,6 +73,10 @@ export type SmartMoneyCandidate = {
   volumeConfirmed: boolean;
   retestConfirmed: boolean;
   higherTimeframeAgreement: string[];
+  marketRegime: MarketRegime;
+  bosQuality: number;
+  impulseConfirmed: boolean;
+  rangeToAtr: number;
   reasons: string[];
   chart: string;
   timestamp: Date;
@@ -64,6 +88,8 @@ export type SmartMoneyScan = {
   candidates: SmartMoneyCandidate[];
   unavailable: string[];
   threshold: number;
+  cooldownSkipped: number;
+  filterStats: SmartMoneyFilterStats;
 };
 
 function finite(value: unknown): value is number {
@@ -353,6 +379,41 @@ function higherTimeframeDirection(rows: Candle[]): Direction | null {
       : null;
 }
 
+function getMarketRegime(rows: Candle[]): MarketRegime {
+  if (rows.length < 20) return "NEUTRAL";
+  const direction = higherTimeframeDirection(rows);
+  if (!direction) return "NEUTRAL";
+  const recentClose = rows.at(-1)!.close;
+  const referenceClose = rows.at(-6)!.close;
+  const change = Math.abs(percent(referenceClose, recentClose));
+  return change >= 0.35 ? direction : "NEUTRAL";
+}
+
+function breakoutQuality(
+  current: Candle,
+  levels: Structure,
+  direction: Direction,
+  currentAtr: number,
+) {
+  const level = direction === "BUY" ? levels.swingHigh : levels.swingLow;
+  if (!level || currentAtr <= 0) {
+    return { quality: 0, impulseConfirmed: false };
+  }
+  const distanceAtr = Math.abs(current.close - level) / currentAtr;
+  const candleRange = Math.max(current.high - current.low, currentAtr * 0.01);
+  const bodyRatio = Math.abs(current.close - current.open) / candleRange;
+  const closeLocation =
+    direction === "BUY"
+      ? (current.close - current.low) / candleRange
+      : (current.high - current.close) / candleRange;
+  const impulseConfirmed =
+    distanceAtr >= 0.12 && bodyRatio >= 0.45 && closeLocation >= 0.62;
+  return {
+    quality: round(distanceAtr),
+    impulseConfirmed,
+  };
+}
+
 async function getAdaptiveThreshold() {
   const result = await db.execute(sql`
     SELECT
@@ -408,12 +469,25 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
       SELECT ticker, timeframe, timestamp, open, high, low, close, volume,
         ROW_NUMBER() OVER (PARTITION BY ticker, timeframe ORDER BY timestamp DESC) AS row_number
       FROM candles
-      WHERE ticker <> 'IMOEX' AND timeframe IN ('1m', '1h')
+      WHERE timeframe IN ('1m', '1h')
     ) latest
     WHERE row_number <= 2880
     ORDER BY ticker, timeframe, timestamp
   `);
   const rows = rowsFromResult(result);
+  const marketOneHour = rows
+    .filter((row) => row.ticker === "IMOEX" && row.timeframe === "1h")
+    .sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime());
+  const marketRegime = getMarketRegime(aggregateClosed(marketOneHour, 60));
+  const cooldownResult = await db.execute(sql`
+    SELECT DISTINCT ticker
+    FROM signals_history
+    WHERE metadata ->> 'source' = 'smartmoney'
+      AND generated_at >= NOW() - INTERVAL '90 minutes'
+  `);
+  const cooldownTickers = new Set(
+    cooldownResult.rows.map((row) => String((row as { ticker: string }).ticker)),
+  );
   const byTicker = new Map<string, { oneMinute: Candle[]; oneHour: Candle[] }>();
   for (const ticker of tickers) {
     byTicker.set(ticker, {
@@ -424,7 +498,28 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
 
   const candidates: SmartMoneyCandidate[] = [];
   const unavailable: string[] = [];
+  let cooldownSkipped = 0;
+  const filterStats: SmartMoneyFilterStats = {
+    cooldown: 0,
+    insufficientHistory: 0,
+    noAccumulation: 0,
+    noStructure: 0,
+    noBreakout: 0,
+    noVolume: 0,
+    noChoch: 0,
+    noHTFAlignment: 0,
+    opposedMarket: 0,
+    weakImpulse: 0,
+    oversizedCandle: 0,
+    lowNetRewardRisk: 0,
+    belowThreshold: 0,
+  };
   for (const ticker of tickers) {
+    if (cooldownTickers.has(ticker)) {
+      cooldownSkipped += 1;
+      filterStats.cooldown += 1;
+      continue;
+    }
     const series = byTicker.get(ticker)!;
     const primary = aggregateClosed(series.oneMinute, 15);
     const thirty = aggregateClosed(series.oneMinute, 30);
@@ -433,23 +528,34 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     const daily = aggregateClosed(oneHour, 1440);
     if (primary.length < 60 || oneHour.length < 20) {
       unavailable.push(`${ticker}: недостаточно 1m/1h свечей`);
+      filterStats.insufficientHistory += 1;
       continue;
     }
     const current = primary.at(-1)!;
     const levels = structure(primary);
     const range = accumulation(primary);
-    if (!range || !levels.direction) continue;
+    if (!range) {
+      filterStats.noAccumulation += 1;
+      continue;
+    }
+    if (!levels.direction) {
+      filterStats.noStructure += 1;
+      continue;
+    }
 
     const direction = levels.direction;
     const liquidity = liquiditySignals(primary, current, levels);
     const block = orderBlock(primary, direction, levels);
     const fvg = fairValueGap(primary, direction);
     const currentAtr = atr(primary) ?? current.close * 0.005;
+    const breakout = levels.bos === (direction === "BUY" ? "Bullish" : "Bearish");
+    const breakoutMetrics = breakoutQuality(current, levels, direction, currentAtr);
+    const rangeToAtr =
+      currentAtr > 0 ? (current.high - current.low) / currentAtr : Number.POSITIVE_INFINITY;
     const averageVolume = average(primary.slice(-21, -1).map((row) => row.volume)) ?? 0;
     const volumeRatio = averageVolume > 0 ? current.volume / averageVolume : 0;
     const momentum = Math.abs(percent(primary.at(-4)!.close, current.close));
     const volumeConfirmed = volumeRatio >= 1.2;
-    const breakout = levels.bos === (direction === "BUY" ? "Bullish" : "Bearish");
     const retestLevel = direction === "BUY" ? levels.swingHigh : levels.swingLow;
     const retestConfirmed =
       retestLevel !== null &&
@@ -482,6 +588,10 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     score += agreement.includes("1D") ? 10 : 0;
     score += trendAligned ? 10 : 0;
     if (trendOpposed) score -= 10;
+    score += breakoutMetrics.impulseConfirmed ? 8 : 0;
+    score += marketRegime === direction ? 8 : marketRegime === "NEUTRAL" ? 0 : -12;
+    if (rangeToAtr <= 2.5) score += 4;
+    if (rangeToAtr > 3) score -= 8;
 
     const threshold = Math.max(
       adaptiveThreshold,
@@ -495,15 +605,38 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     const takeProfit2 = direction === "BUY" ? current.close + risk * 2 : current.close - risk * 2;
     const takeProfit3 = direction === "BUY" ? current.close + risk * 3 : current.close - risk * 3;
     const rewardRisk = risk > 0 ? Math.abs(takeProfit2 - current.close) / risk : 0;
-    if (
+    const roundTripCost = current.close * (ROUND_TRIP_COST_PERCENT / 100);
+    const netRewardRisk =
+      risk + roundTripCost > 0
+        ? (Math.abs(takeProfit2 - current.close) - roundTripCost) /
+          (risk + roundTripCost)
+        : 0;
+    const rejected =
       range.strength === "Weak" ||
       !breakout ||
       !volumeConfirmed ||
-      !levels.choch ||
+      !levels.choch && !(breakoutMetrics.impulseConfirmed && trendAligned) ||
       !trendAligned ||
-      rewardRisk < 2 ||
-      score < threshold
-    ) {
+      (marketRegime !== "NEUTRAL" && marketRegime !== direction) ||
+      !breakoutMetrics.impulseConfirmed ||
+      rangeToAtr > 3.5 ||
+      netRewardRisk < 1.65 ||
+      score < threshold;
+    if (rejected) {
+      if (range.strength === "Weak") filterStats.noAccumulation += 1;
+      if (!breakout) filterStats.noBreakout += 1;
+      if (!volumeConfirmed) filterStats.noVolume += 1;
+      if (!levels.choch && !(breakoutMetrics.impulseConfirmed && trendAligned)) {
+        filterStats.noChoch += 1;
+      }
+      if (!trendAligned) filterStats.noHTFAlignment += 1;
+      if (marketRegime !== "NEUTRAL" && marketRegime !== direction) {
+        filterStats.opposedMarket += 1;
+      }
+      if (!breakoutMetrics.impulseConfirmed) filterStats.weakImpulse += 1;
+      if (rangeToAtr > 3.5) filterStats.oversizedCandle += 1;
+      if (netRewardRisk < 1.65) filterStats.lowNetRewardRisk += 1;
+      if (score < threshold) filterStats.belowThreshold += 1;
       continue;
     }
 
@@ -515,8 +648,12 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
       block ?? "Order Block не найден",
       fvg ?? "FVG не найден",
       `Volume Confirmation ${volumeRatio.toFixed(2)}x`,
+      `Net R:R ${netRewardRisk.toFixed(2)} после ${ROUND_TRIP_COST_PERCENT.toFixed(2)}% издержек`,
+      `BOS impulse ${breakoutMetrics.quality.toFixed(2)} ATR · ${breakoutMetrics.impulseConfirmed ? "подтверждён" : "слабый"}`,
+      `Свеча/ATR ${rangeToAtr.toFixed(2)}x`,
       retestConfirmed ? "Retest подтверждён" : "Retest не подтверждён",
       `HTF alignment: ${agreement.join(", ")}`,
+      `Режим IMOEX: ${marketRegime === "BUY" ? "сильный рынок" : marketRegime === "SELL" ? "слабый рынок" : "нейтральный"}`,
     ];
     const chartText = chart(primary, {
       entry: current.close,
@@ -538,6 +675,7 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
       takeProfit2,
       takeProfit3,
       rewardRisk,
+      netRewardRisk: round(netRewardRisk),
       accumulation: range,
       structure: levels,
       liquidity,
@@ -546,6 +684,10 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
       volumeConfirmed,
       retestConfirmed,
       higherTimeframeAgreement: agreement,
+      marketRegime,
+      bosQuality: breakoutMetrics.quality,
+      impulseConfirmed: breakoutMetrics.impulseConfirmed,
+      rangeToAtr: round(rangeToAtr),
       reasons,
       chart: chartText,
       timestamp: current.timestamp,
@@ -558,5 +700,7 @@ export async function scanSmartMoney(): Promise<SmartMoneyScan> {
     candidates: candidates.slice(0, 5),
     unavailable,
     threshold: adaptiveThreshold,
+    cooldownSkipped,
+    filterStats,
   };
 }

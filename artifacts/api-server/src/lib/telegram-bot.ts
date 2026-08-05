@@ -508,8 +508,10 @@ async function evaluatePaperSignals() {
     const candleTimeframe =
       metadata.intraday === true
         ? "1m"
-        : typeof metadata.timeframe === "string"
-          ? metadata.timeframe
+        : typeof metadata.executionTimeframe === "string"
+          ? metadata.executionTimeframe
+          : typeof metadata.timeframe === "string"
+            ? metadata.timeframe
           : TIMEFRAME;
     if (
       !Number.isFinite(id) ||
@@ -2287,6 +2289,7 @@ function smartMoneyCandidateText(candidate: SmartMoneyCandidate, index: number) 
     `Take Profit 2: ${formatNumber(candidate.takeProfit2)} (${sign}${formatNumber(Math.abs((candidate.takeProfit2 - candidate.entryPrice) / candidate.entryPrice * 100), 2)}%)`,
     `Take Profit 3: ${formatNumber(candidate.takeProfit3)} (${sign}${formatNumber(Math.abs((candidate.takeProfit3 - candidate.entryPrice) / candidate.entryPrice * 100), 2)}%)`,
     `Risk / Reward: 1:${formatNumber(candidate.rewardRisk, 2)}`,
+    `Net R:R после комиссий/проскальзывания: 1:${formatNumber(candidate.netRewardRisk, 2)}`,
     "",
     `Накопление: ${candidate.accumulation.strength} · ${candidate.accumulation.score} баллов`,
     `Диапазон накопления: ${formatNumber(candidate.accumulation.rangeLow)}–${formatNumber(candidate.accumulation.rangeHigh)}`,
@@ -2297,6 +2300,9 @@ function smartMoneyCandidateText(candidate: SmartMoneyCandidate, index: number) 
     `FVG: ${candidate.fairValueGap ?? "не найден"}`,
     `Объём: ${candidate.volumeConfirmed ? "подтверждён" : "не подтверждён"} · ретест: ${candidate.retestConfirmed ? "подтверждён" : "не подтверждён"}`,
     `Согласование старших ТФ: ${candidate.higherTimeframeAgreement.join(", ")}`,
+    `Режим IMOEX: ${candidate.marketRegime === "BUY" ? "сильный рынок" : candidate.marketRegime === "SELL" ? "слабый рынок" : "нейтральный"}`,
+    `Импульс BOS: ${candidate.impulseConfirmed ? "подтверждён" : "слабый"} · ${formatNumber(candidate.bosQuality, 2)} ATR`,
+    `Размер сигнальной свечи: ${formatNumber(candidate.rangeToAtr, 2)} ATR`,
     "",
     "Причины:",
     ...candidate.reasons.map((reason) => `✅ ${reason}`),
@@ -2634,11 +2640,14 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
       timeframe: "15m",
       metadata: {
         smartMoney: true,
-        timeframe: "1m",
+        timeframe: "15m",
+        setupTimeframe: "15m",
+        executionTimeframe: "1m",
         strategy: "SMC-Accumulation-BOS-CHoCH",
         probability: candidate.probability,
         adaptiveThreshold: candidate.threshold,
         rewardRisk: candidate.rewardRisk,
+        netRewardRisk: candidate.netRewardRisk,
         takeProfit1: candidate.takeProfit1,
         takeProfit2: candidate.takeProfit2,
         takeProfit3: candidate.takeProfit3,
@@ -2650,6 +2659,10 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
         volumeConfirmed: candidate.volumeConfirmed,
         retestConfirmed: candidate.retestConfirmed,
         higherTimeframeAgreement: candidate.higherTimeframeAgreement,
+        marketRegime: candidate.marketRegime,
+        bosQuality: candidate.bosQuality,
+        impulseConfirmed: candidate.impulseConfirmed,
+        rangeToAtr: candidate.rangeToAtr,
         chart: candidate.chart,
       },
     });
@@ -2669,6 +2682,12 @@ async function smartMoneyText() {
     const blocks = scan.candidates.map((candidate, index) =>
       smartMoneyCandidateText(candidate, index + 1),
     );
+    const rejectionPreview = Object.entries(scan.filterStats)
+      .filter(([, count]) => count > 0)
+      .sort(([, left], [, right]) => right - left)
+      .slice(0, 3)
+      .map(([name, count]) => `${name}: ${count}`)
+      .join(" · ");
     return [
       "💰 SMART MONEY · SMC IMOEX",
       "",
@@ -2676,6 +2695,12 @@ async function smartMoneyText() {
       `Адаптивный минимальный рейтинг: ${formatNumber(scan.threshold, 0)}/100`,
       "Фильтр: накопление + BOS + CHoCH + объём + HTF alignment + R:R ≥ 1:2.",
       `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates} · заблокировано риск-фильтром: ${records.blocked}`,
+      scan.cooldownSkipped
+        ? `Cooldown: ${scan.cooldownSkipped} тикеров временно пропущено после недавнего SMC-сигнала.`
+        : "Cooldown: повторных SMC-сигналов по тикерам нет.",
+      rejectionPreview
+        ? `Основные причины отсева: ${rejectionPreview}`
+        : "Основных причин отсева нет.",
       "",
       ...(blocks.length
         ? blocks.flatMap((block) => [block, ""])
