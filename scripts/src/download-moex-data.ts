@@ -46,6 +46,11 @@ const IS_RAW_ONLY_TIMEFRAME = !IS_FEATURE_TIMEFRAME;
 const PAGE_SIZE = 500;
 const REQUEST_DELAY_MS = 120;
 const LOOKBACK_DAYS = Math.max(1, Number(arg("days", "5")) || 5);
+const MONEY_TEST_TICKERS = [
+  { secid: "SMLT", shortName: "Самолёт" },
+  { secid: "SOFL", shortName: "Софтлайн" },
+  { secid: "DELI", shortName: "Делимобиль" },
+] as const;
 
 function integerArg(name: string, fallback: number): number {
   const value = Number(arg(name, String(fallback)));
@@ -864,16 +869,25 @@ async function main() {
       for (let index = 0; index < allTickers.length; index += 1) {
         await saveTicker(allTickers[index], index + 1);
       }
+      for (const ticker of MONEY_TEST_TICKERS) {
+        await saveTicker(ticker, 0, false);
+      }
     }
     const selectedTickers = requestedTicker
       ? [
-          allTickers.find((ticker) => ticker.secid === requestedTicker) ?? {
-            secid: requestedTicker,
-            shortName: null,
-            capitalization: undefined,
-          },
+          allTickers.find((ticker) => ticker.secid === requestedTicker) ??
+            MONEY_TEST_TICKERS.find((ticker) => ticker.secid === requestedTicker) ?? {
+              secid: requestedTicker,
+              shortName: null,
+              capitalization: undefined,
+            },
         ]
-      : allTickers;
+      : [
+          ...allTickers,
+          ...MONEY_TEST_TICKERS.filter(
+            (extra) => !allTickers.some((ticker) => ticker.secid === extra.secid),
+          ),
+        ];
 
     const end = new Date();
     const start = new Date(end.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);

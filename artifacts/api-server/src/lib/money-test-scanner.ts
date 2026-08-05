@@ -2,6 +2,7 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import {
   scanSmartMoney,
+  MONEY_TEST_TICKERS,
   type SmartMoneyCandidate,
   type SmartMoneyScan,
 } from "./smart-money-scanner";
@@ -25,7 +26,16 @@ export type MoneyTestScan = {
   candidates: SmartMoneyCandidate[];
   market: MoneyTestMarket;
   rejected: Array<{ ticker: string; reasons: string[] }>;
+  diagnostics: Array<{
+    ticker: string;
+    name: string;
+    stage: "base-smc-rejected" | "test-filter-rejected" | "passed";
+    reasons: string[];
+    extraReasons: string[];
+  }>;
 };
+
+export { MONEY_TEST_TICKERS };
 
 function moscowParts(timestamp: Date) {
   const values = new Intl.DateTimeFormat("en-GB", {
@@ -125,7 +135,13 @@ async function liquidityByTicker() {
       ) AS baseline_volume
     FROM candles
     WHERE timeframe = '1m'
-      AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+      AND (
+        ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+        OR ticker IN (${sql.join(
+          MONEY_TEST_TICKERS.map((ticker) => sql`${ticker}`),
+          sql`, `,
+        )})
+      )
       AND timestamp >= NOW() - INTERVAL '4 hours'
     GROUP BY ticker
   `);
@@ -144,9 +160,19 @@ async function liquidityByTicker() {
   );
 }
 
+function moneyTestTickerName(ticker: string) {
+  return (
+    {
+      SMLT: "Самолёт",
+      SOFL: "Софтлайн",
+      DELI: "Делимобиль",
+    }[ticker] ?? ticker
+  );
+}
+
 export async function scanMoneyTest(): Promise<MoneyTestScan> {
   const base = await scanSmartMoney(undefined, {
-    universe: "imoex",
+    universe: "money-test",
     source: "money-test",
   });
   const market = await analyzeMarket(base.generatedAt);
@@ -185,11 +211,27 @@ export async function scanMoneyTest(): Promise<MoneyTestScan> {
     }
     return true;
   });
+  const diagnostics = MONEY_TEST_TICKERS.map((ticker) => {
+    const diagnostic = base.diagnostics.find((item) => item.ticker === ticker);
+    const extra = rejected.find((item) => item.ticker === ticker);
+    return {
+      ticker,
+      name: moneyTestTickerName(ticker),
+      stage: diagnostic?.passed
+        ? extra
+          ? ("test-filter-rejected" as const)
+          : ("passed" as const)
+        : ("base-smc-rejected" as const),
+      reasons: diagnostic?.reasons ?? ["Нет свежих данных для оценки."],
+      extraReasons: extra?.reasons ?? [],
+    };
+  });
   return {
     generatedAt: base.generatedAt,
     base,
     candidates,
     market,
     rejected,
+    diagnostics,
   };
 }

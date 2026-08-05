@@ -2727,6 +2727,16 @@ async function moneyTestText(chatId?: number): Promise<TelegramMessage> {
       .slice(0, 5)
       .map(({ ticker, reasons }) => `${ticker}: ${reasons[0]}`)
       .join("; ");
+    const tickerDiagnostics = scan.diagnostics.map((item) => {
+      const stage =
+        item.stage === "passed"
+          ? "ПРОШЛА"
+          : item.stage === "test-filter-rejected"
+            ? "отсечена фильтрами теста"
+            : "отсечена базовым SMC";
+      const reasons = [...item.reasons, ...item.extraReasons].slice(0, 2).join(" ");
+      return `${item.name} (${item.ticker}): ${stage}. ${reasons}`;
+    });
     return {
       text: [
         "💵 ДЕНЬГИ ТЕСТ · ЭКСПЕРИМЕНТАЛЬНЫЙ INTRADAY SMC",
@@ -2737,8 +2747,14 @@ async function moneyTestText(chatId?: number): Promise<TelegramMessage> {
         `Торговое окно: ${scan.market.inTradeWindow ? "активно" : "неактивно"} · ${scan.market.sessionLabel}`,
         "",
         "Новые фильтры теста: время сессии, ширина рынка, точка входа возле OB/FVG или ретест, объём и текущая ликвидность.",
+        "Этап 1 — базовый SMC: накопление, BOS, CHoCH/альтернативное подтверждение, объём, HTF, импульс, R:R и рейтинг.",
+        "Этап 2 — фильтры ДЕНЬГИ ТЕСТ: торговое окно, breadth, качество входа и ликвидность.",
         `Кандидатов после экспериментальных фильтров: ${scan.candidates.length}`,
         `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates}`,
+        "",
+        "Проверка добавленных компаний:",
+        ...tickerDiagnostics,
+        "",
         rejectedPreview
           ? `Примеры отсева: ${rejectedPreview}`
           : "Дополнительных отсеянных кандидатов нет.",
@@ -3771,8 +3787,9 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
         SELECT ticker, MAX(timestamp) AS latest
         FROM candles
         WHERE timeframe = '1h'
-          AND ticker IN (
-            SELECT secid FROM moex_tickers WHERE is_active = true
+          AND (
+            ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+            OR ticker IN ('SMLT', 'SOFL', 'DELI')
           )
         GROUP BY ticker
       ) latest_by_ticker
@@ -3836,10 +3853,11 @@ async function ensureSmartMoneyDataFresh() {
     FROM (
       SELECT ticker, timeframe, MAX(timestamp) AS latest
       FROM candles
-      WHERE timeframe IN ('1m', '1h')
-        AND ticker IN (
-          SELECT secid FROM moex_tickers WHERE is_active = true
-        )
+        WHERE timeframe IN ('1m', '1h')
+          AND (
+            ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+            OR ticker IN ('SMLT', 'SOFL', 'DELI')
+          )
       GROUP BY ticker, timeframe
     ) latest_by_ticker
     GROUP BY timeframe

@@ -35,7 +35,8 @@ type Accumulation = {
 type MarketRegime = "BUY" | "SELL" | "NEUTRAL";
 const ROUND_TRIP_COST_PERCENT = 0.2;
 export const COMMODITY_TICKERS = ["XAUUSD", "XAGUSD", "BRENT"] as const;
-export type SmartMoneyUniverse = "imoex" | "commodities";
+export const MONEY_TEST_TICKERS = ["SMLT", "SOFL", "DELI"] as const;
+export type SmartMoneyUniverse = "imoex" | "commodities" | "money-test";
 export type SmartMoneySource =
   | "smartmoney"
   | "commodity-smartmoney"
@@ -492,19 +493,29 @@ export async function scanSmartMoney(
         ? requestedTicker
           ? inArray(moexTickers.secid, [requestedTicker])
           : inArray(moexTickers.secid, [...COMMODITY_TICKERS])
+        : universe === "money-test"
+          ? requestedTicker
+            ? inArray(moexTickers.secid, [requestedTicker])
+            : or(
+                eq(moexTickers.isActive, true),
+                inArray(moexTickers.secid, [...MONEY_TEST_TICKERS]),
+              )
         : requestedTicker
           ? or(eq(moexTickers.isActive, true), eq(moexTickers.secid, requestedTicker))
           : eq(moexTickers.isActive, true),
     )
     .orderBy(desc(moexTickers.rank));
   const activeTickers = tickerRows.map((row) => row.ticker).filter((ticker) => ticker !== "IMOEX");
-  const tickers = universe === "commodities"
-    ? activeTickers.filter((ticker) =>
-        COMMODITY_TICKERS.includes(ticker as (typeof COMMODITY_TICKERS)[number]),
-      )
-    : requestedTicker
-      ? activeTickers.filter((ticker) => ticker === requestedTicker)
-      : activeTickers;
+  const tickers =
+    universe === "commodities"
+      ? activeTickers.filter((ticker) =>
+          COMMODITY_TICKERS.includes(ticker as (typeof COMMODITY_TICKERS)[number]),
+        )
+      : universe === "money-test"
+        ? activeTickers
+        : requestedTicker
+          ? activeTickers.filter((ticker) => ticker === requestedTicker)
+          : activeTickers;
   const result = await db.execute(sql`
     SELECT ticker, timeframe, timestamp, open, high, low, close, volume
     FROM (
