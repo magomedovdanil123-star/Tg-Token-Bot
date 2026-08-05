@@ -9,7 +9,10 @@ type PivotKind = "high" | "low";
 const MIN_TARGET_PERCENT = 0.5;
 const MIN_STOP_PERCENT = 0.5;
 const TRANSACTION_COST_PERCENT = 0.2;
-const MAX_AGE_MINUTES: Record<WaveTimeframe, number> = { "30m": 150, "1h": 270 };
+// MOEX candles can legitimately pause overnight and around session boundaries.
+// Keep the live scan available through that gap without treating a multi-day
+// stale series as current.
+const MAX_AGE_MINUTES: Record<WaveTimeframe, number> = { "30m": 720, "1h": 720 };
 const MAX_BARS_PER_SERIES = 2400;
 const BACKTEST_START_BARS = 120;
 const COOLDOWN_BARS: Record<WaveTimeframe, number> = { "30m": 8, "1h": 6 };
@@ -107,6 +110,14 @@ export type WaveBacktestTrade = {
   stopPrice: number;
   targetPercent: number;
   stopPercent: number;
+  rewardRisk: number;
+  relativeVolume: number | null;
+  retracement: number | null;
+  momentumPercent: number;
+  bodyRatio: number;
+  rsi: number | null;
+  atrPercent: number | null;
+  trendAligned: boolean;
   confidence: number;
   outcome: "TP" | "SL" | "TIMEOUT" | "OPEN_AT_END";
   outcomePercent: number;
@@ -131,6 +142,32 @@ export type WaveBacktestResult = {
   endingBalanceRub: number;
   maxDrawdownRub: number;
   trades: WaveBacktestTrade[];
+};
+
+type WaveBacktestOptions = {
+  days?: number;
+  stakePerTrade?: number;
+  asOf?: Date;
+  minConfidence?: number;
+  minRelativeVolume?: number;
+  minTargetPercent?: number;
+  maxStopPercent?: number;
+  minRewardRisk?: number;
+  timeframes?: WaveTimeframe[];
+  directions?: Direction[];
+  scenarios?: string[];
+  maxSignalsPerBucket?: number;
+  targetPercentOverride?: number;
+  stopPercentOverride?: number;
+  holdingBars?: number;
+  minDirectionalMomentumPercent?: number;
+  minBodyRatio?: number;
+  cooldownBars?: number;
+  requireTrendAlignment?: boolean;
+  minRsi?: number;
+  maxRsi?: number;
+  minAtrPercent?: number;
+  maxAtrPercent?: number;
 };
 
 type Series = {
@@ -196,45 +233,56 @@ function upperBound(pivots: Pivot[], index: number) {
 }
 
 function confirmedPivots(rows: Candle[], timeframe: WaveTimeframe): Pivot[] {
-  const lookback = pivotLookback(timeframe);
-  const swingPercent = minSwingPercent(timeframe);
-  const raw: Pivot[] = [];
-  for (let index = lookback; index < rows.length - lookback; index += 1) {
-    const row = rows[index];
-    const before = rows.slice(index - lookback, index);
-    const after = rows.slice(index + 1, index + lookback + 1);
-    const isHigh =
-      before.every((item) => item.high <= row.high) &&
-      after.every((item) => item.high <= row.high);
-    const isLow =
-      before.every((item) => item.low >= row.low) &&
-      after.every((item) => item.low >= row.low);
-    if (isHigh === isLow) continue;
-    raw.push({
-      index,
-      confirmationIndex: index + lookback,
-      kind: isHigh ? "high" : "low",
-      price: isHigh ? row.high : row.low,
-    });
-  }
-
   const result: Pivot[] = [];
-  for (const pivot of raw) {
+  for (let confirmationIndex = 0; confirmationIndex < rows.length; confirmationIndex += 1) {
+    appendConfirmedPivot(rows, confirmationIndex, timeframe, result);
+  }
+  return result;
+}
+
+function appendConfirmedPivot(
+  rows: Candle[],
+  confirmationIndex: number,
+  timeframe: WaveTimeframe,
+  result: Pivot[],
+) {
+  const lookback = pivotLookback(timeframe);
+  const pivotIndex = confirmationIndex - lookback;
+  if (pivotIndex < lookback) return;
+  const row = rows[pivotIndex];
+  const before = rows.slice(pivotIndex - lookback, pivotIndex);
+  const after = rows.slice(pivotIndex + 1, confirmationIndex + 1);
+  if (after.length < lookback) return;
+  const isHigh =
+    before.every((item) => item.high <= row.high) &&
+    after.every((item) => item.high <= row.high);
+  const isLow =
+    before.every((item) => item.low >= row.low) &&
+    after.every((item) => item.low >= row.low);
+  if (isHigh === isLow) return;
+
+  const pivot: Pivot = {
+    index: pivotIndex,
+    confirmationIndex,
+    kind: isHigh ? "high" : "low",
+    price: isHigh ? row.high : row.low,
+  };
+  const swingPercent = minSwingPercent(timeframe);
+  {
     const previous = result.at(-1);
     if (!previous) {
       result.push(pivot);
-      continue;
+      return;
     }
     if (previous.kind === pivot.kind) {
       const moreExtreme =
         pivot.kind === "high" ? pivot.price >= previous.price : pivot.price <= previous.price;
       if (moreExtreme) result[result.length - 1] = pivot;
-      continue;
+      return;
     }
     const movement = Math.abs(pct(previous.price, pivot.price));
     if (movement >= swingPercent) result.push(pivot);
   }
-  return result;
 }
 
 function fibonacci(
@@ -286,6 +334,57 @@ function relativeVolume(rows: Candle[], index: number) {
   const values = rows.slice(Math.max(0, index - 20), index).map((row) => row.volume).filter(finite);
   const baseline = average(values);
   return baseline && baseline > 0 ? rows[index].volume / baseline : null;
+}
+
+function candleBodyRatio(rows: Candle[], index: number) {
+  const candle = rows[index];
+  const range = candle.high - candle.low;
+  return range > 0 ? Math.abs(candle.close - candle.open) / range : 0;
+}
+
+function momentumPercent(rows: Candle[], index: number, timeframe: WaveTimeframe) {
+  const lookback = timeframe === "30m" ? 8 : 4;
+  const previous = rows[index - lookback]?.close;
+  return previous ? pct(previous, rows[index].close) : 0;
+}
+
+function indicatorSnapshot(rows: Candle[], index: number, direction: Direction) {
+  const start = Math.max(1, index - 220);
+  let ema20 = rows[start - 1]?.close ?? rows[index].close;
+  let ema50 = ema20;
+  let ema200 = ema20;
+  for (let cursor = start; cursor <= index; cursor += 1) {
+    const close = rows[cursor].close;
+    ema20 = close * (2 / 21) + ema20 * (1 - 2 / 21);
+    ema50 = close * (2 / 51) + ema50 * (1 - 2 / 51);
+    ema200 = close * (2 / 201) + ema200 * (1 - 2 / 201);
+  }
+  const rsiStart = Math.max(1, index - 14 + 1);
+  let gains = 0;
+  let losses = 0;
+  for (let cursor = rsiStart; cursor <= index; cursor += 1) {
+    const change = rows[cursor].close - rows[cursor - 1].close;
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  const rsi = losses === 0 ? (gains > 0 ? 100 : 50) : 100 - 100 / (1 + gains / losses);
+  let trueRange = 0;
+  const atrStart = Math.max(1, index - 14 + 1);
+  for (let cursor = atrStart; cursor <= index; cursor += 1) {
+    const previousClose = rows[cursor - 1].close;
+    trueRange += Math.max(
+      rows[cursor].high - rows[cursor].low,
+      Math.abs(rows[cursor].high - previousClose),
+      Math.abs(rows[cursor].low - previousClose),
+    );
+  }
+  const atrPercent = rows[index].close > 0
+    ? (trueRange / Math.max(1, index - atrStart + 1) / rows[index].close) * 100
+    : null;
+  const trendAligned = direction === "BUY"
+    ? rows[index].close > ema20 && ema20 > ema50
+    : rows[index].close < ema20 && ema20 < ema50;
+  return { rsi, atrPercent, trendAligned };
 }
 
 function validTrade(direction: Direction, entry: number, target: number, stop: number) {
@@ -706,10 +805,12 @@ export async function scanElliottWaveStrategies(): Promise<ElliottScanResult> {
     const age = (now - latest.timestamp.getTime()) / 60_000;
     const fresh = age <= MAX_AGE_MINUTES[item.timeframe];
     if (fresh) freshSeries += 1;
-    const pivots = confirmedPivots(item.candles, item.timeframe);
+    const pivots: Pivot[] = [];
     let lastEventIndex = -Infinity;
     const start = Math.max(BACKTEST_START_BARS, item.candles.length - 1700);
-    for (let index = start; index < item.candles.length; index += 1) {
+    for (let index = 0; index < item.candles.length; index += 1) {
+      appendConfirmedPivot(item.candles, index, item.timeframe, pivots);
+      if (index < start) continue;
       const detected = detectAt(item.candles, index, item.timeframe, pivots);
       for (const candidate of detected) {
         if (index - lastEventIndex < COOLDOWN_BARS[item.timeframe]) continue;
@@ -758,11 +859,7 @@ export async function scanElliottWaveStrategies(): Promise<ElliottScanResult> {
   };
 }
 
-export async function backtestElliottWaveMonth(options?: {
-  days?: number;
-  stakePerTrade?: number;
-  asOf?: Date;
-}): Promise<WaveBacktestResult> {
+export async function backtestElliottWaveMonth(options?: WaveBacktestOptions): Promise<WaveBacktestResult> {
   const days = options?.days ?? 30;
   const stakePerTrade = options?.stakePerTrade ?? 100_000;
   const periodEnd = options?.asOf ?? new Date();
@@ -778,79 +875,147 @@ export async function backtestElliottWaveMonth(options?: {
     ORDER BY c.ticker, c.timeframe, c.timestamp
   `);
   const series = parseSeries(result.rows as Record<string, unknown>[]);
-  const seriesByKey = new Map(series.map((item) => [`${item.ticker}:${item.timeframe}`, item]));
-  const scanTimes = [
-    ...new Set(
-      series
-        .filter((item) => item.timeframe === "30m")
-        .flatMap((item) =>
-          item.candles
-            .filter((candle) => candle.timestamp >= periodStart && candle.timestamp <= periodEnd)
-            .map((candle) => candle.timestamp.getTime()),
-        ),
-    ),
-  ].sort((a, b) => a - b);
+  const candidateEvents: {
+    candidate: RawCandidate;
+    item: Series;
+    index: number;
+    bucket: number;
+  }[] = [];
   const seen = new Set<string>();
-  const trades: WaveBacktestTrade[] = [];
-
-  for (const scanTimeMs of scanTimes) {
-    const scanTime = new Date(scanTimeMs);
-    const candidates: RawCandidate[] = [];
-    for (const item of series) {
-      const available = item.candles.filter((candle) => candle.timestamp <= scanTime);
-      const latest = available.at(-1);
-      if (!latest || available.length < BACKTEST_START_BARS) continue;
-      const age = (scanTime.getTime() - latest.timestamp.getTime()) / 60_000;
-      if (age < 0 || age > MAX_AGE_MINUTES[item.timeframe]) continue;
-      const pivots = confirmedPivots(available, item.timeframe);
-      const firstCurrentIndex = Math.max(
-        BACKTEST_START_BARS,
-        available.length - CURRENT_SIGNAL_BARS[item.timeframe],
-      );
-      for (let index = firstCurrentIndex; index < available.length; index += 1) {
-        candidates.push(...detectAt(available, index, item.timeframe, pivots));
+  for (const item of series) {
+    if (item.candles.length < BACKTEST_START_BARS) continue;
+    const pivots: Pivot[] = [];
+    const periodStartIndex = item.candles.findIndex(
+      (candle) => candle.timestamp >= periodStart,
+    );
+    const startIndex = Math.max(
+      BACKTEST_START_BARS,
+      periodStartIndex < 0
+        ? item.candles.length
+        : periodStartIndex - CURRENT_SIGNAL_BARS[item.timeframe],
+    );
+    for (let index = 0; index < item.candles.length; index += 1) {
+      appendConfirmedPivot(item.candles, index, item.timeframe, pivots);
+      if (index < startIndex) continue;
+      const timestamp = item.candles[index].timestamp;
+      if (timestamp < periodStart || timestamp > periodEnd) continue;
+      for (const candidate of detectAt(item.candles, index, item.timeframe, pivots)) {
+        const momentum = momentumPercent(item.candles, index, item.timeframe);
+        const directionalMomentum = candidate.direction === "BUY" ? momentum : -momentum;
+        const bodyRatio = candleBodyRatio(item.candles, index);
+        const indicators = indicatorSnapshot(item.candles, index, candidate.direction);
+        const targetPercent = options?.targetPercentOverride ?? candidate.targetPercent;
+        const stopPercent = options?.stopPercentOverride ?? candidate.stopPercent;
+        const rewardRisk = stopPercent > 0 ? targetPercent / stopPercent : 0;
+        if (options?.minConfidence !== undefined && candidate.confidence < options.minConfidence) continue;
+        if (
+          options?.minRelativeVolume !== undefined &&
+          (candidate.relativeVolume === null || candidate.relativeVolume < options.minRelativeVolume)
+        ) continue;
+        if (options?.minTargetPercent !== undefined && targetPercent < options.minTargetPercent) continue;
+        if (options?.maxStopPercent !== undefined && stopPercent > options.maxStopPercent) continue;
+        if (options?.minRewardRisk !== undefined && rewardRisk < options.minRewardRisk) continue;
+        if (
+          options?.minDirectionalMomentumPercent !== undefined &&
+          directionalMomentum < options.minDirectionalMomentumPercent
+        ) continue;
+        if (options?.minBodyRatio !== undefined && bodyRatio < options.minBodyRatio) continue;
+        if (options?.requireTrendAlignment && !indicators.trendAligned) continue;
+        if (options?.minRsi !== undefined && indicators.rsi < options.minRsi) continue;
+        if (options?.maxRsi !== undefined && indicators.rsi > options.maxRsi) continue;
+        if (
+          options?.minAtrPercent !== undefined &&
+          (indicators.atrPercent === null || indicators.atrPercent < options.minAtrPercent)
+        ) continue;
+        if (
+          options?.maxAtrPercent !== undefined &&
+          (indicators.atrPercent === null || indicators.atrPercent > options.maxAtrPercent)
+        ) continue;
+        if (options?.timeframes && !options.timeframes.includes(candidate.timeframe)) continue;
+        if (options?.directions && !options.directions.includes(candidate.direction)) continue;
+        if (options?.scenarios && !options.scenarios.includes(candidate.scenario)) continue;
+        const key = `${candidate.ticker}:${candidate.timeframe}:${candidate.direction}:${candidate.scenario}:${candidate.timestamp.toISOString()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidateEvents.push({
+          candidate,
+          item,
+          index,
+          bucket: Math.floor(candidate.timestamp.getTime() / (30 * 60_000)),
+        });
       }
     }
+  }
 
-    const freshCandidates = candidates
-      .filter((candidate) => candidate.timestamp >= periodStart && candidate.timestamp <= periodEnd)
-      .filter((candidate) => {
-        const key = `${candidate.ticker}:${candidate.timeframe}:${candidate.direction}:${candidate.scenario}:${candidate.timestamp.toISOString()}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 5);
-
-    for (const candidate of freshCandidates) {
-      const item = seriesByKey.get(`${candidate.ticker}:${candidate.timeframe}`);
-      if (!item) continue;
-      const index = item.candles.findIndex(
-        (candle) => candle.timestamp.getTime() === candidate.timestamp.getTime(),
-      );
+  const eventBuckets = new Map<number, typeof candidateEvents>();
+  for (const event of candidateEvents) {
+    const bucket = eventBuckets.get(event.bucket) ?? [];
+    bucket.push(event);
+    eventBuckets.set(event.bucket, bucket);
+  }
+  const trades: WaveBacktestTrade[] = [];
+  const lastSelected = new Map<string, number>();
+  for (const bucketEvents of [...eventBuckets.values()].sort(
+    (a, b) => a[0].bucket - b[0].bucket,
+  )) {
+    const selectedEvents: typeof candidateEvents = [];
+    for (const event of bucketEvents.sort(
+      (a, b) => b.candidate.confidence - a.candidate.confidence,
+    )) {
+      if (selectedEvents.length >= (options?.maxSignalsPerBucket ?? 5)) break;
+      const key = `${event.candidate.ticker}:${event.candidate.timeframe}:${event.candidate.direction}:${event.candidate.scenario}`;
+      const previousIndex = lastSelected.get(key);
+      if (
+        previousIndex !== undefined &&
+        event.index - previousIndex < (options?.cooldownBars ?? 0)
+      ) {
+        continue;
+      }
+      selectedEvents.push(event);
+      lastSelected.set(key, event.index);
+    }
+    for (const event of selectedEvents) {
+      const { candidate, item, index } = event;
+      const targetPercent = options?.targetPercentOverride ?? candidate.targetPercent;
+      const stopPercent = options?.stopPercentOverride ?? candidate.stopPercent;
+      const targetPrice = candidate.direction === "BUY"
+        ? candidate.entryPrice * (1 + targetPercent / 100)
+        : candidate.entryPrice * (1 - targetPercent / 100);
+      const stopPrice = candidate.direction === "BUY"
+        ? candidate.entryPrice * (1 - stopPercent / 100)
+        : candidate.entryPrice * (1 + stopPercent / 100);
+      const rewardRisk = stopPercent > 0 ? targetPercent / stopPercent : 0;
+      const momentum = momentumPercent(item.candles, index, candidate.timeframe);
+      const bodyRatio = candleBodyRatio(item.candles, index);
+      const indicators = indicatorSnapshot(item.candles, index, candidate.direction);
       if (index < 0) continue;
-      const maxIndex = Math.min(item.candles.length - 1, index + timeframeBars(candidate.timeframe));
+      const maxIndex = Math.min(
+        item.candles.length - 1,
+        index + (options?.holdingBars ?? timeframeBars(candidate.timeframe)),
+      );
       let outcome: WaveBacktestTrade["outcome"] = "OPEN_AT_END";
       let outcomePercent: number | undefined;
       let exitIndex = maxIndex;
       for (let next = index + 1; next <= maxIndex; next += 1) {
         const candle = item.candles[next];
         const targetHit = candidate.direction === "BUY"
-          ? candle.high >= candidate.targetPrice
-          : candle.low <= candidate.targetPrice;
+          ? candle.high >= targetPrice
+          : candle.low <= targetPrice;
         const stopHit = candidate.direction === "BUY"
-          ? candle.low <= candidate.stopPrice
-          : candle.high >= candidate.stopPrice;
+          ? candle.low <= stopPrice
+          : candle.high >= stopPrice;
         if (targetHit || stopHit) {
           const isWin = targetHit && !stopHit;
-          const exit = isWin ? candidate.targetPrice : candidate.stopPrice;
+          const exit = isWin ? targetPrice : stopPrice;
           outcome = isWin ? "TP" : "SL";
           outcomePercent = positivePct(candidate.direction, candidate.entryPrice, exit) - TRANSACTION_COST_PERCENT;
           exitIndex = next;
           break;
         }
-        if (next === maxIndex && maxIndex === index + timeframeBars(candidate.timeframe)) {
+        if (
+          next === maxIndex &&
+          maxIndex === index + (options?.holdingBars ?? timeframeBars(candidate.timeframe))
+        ) {
           outcome = "TIMEOUT";
           outcomePercent = positivePct(candidate.direction, candidate.entryPrice, candle.close) - TRANSACTION_COST_PERCENT;
         }
@@ -866,10 +1031,18 @@ export async function backtestElliottWaveMonth(options?: {
         direction: candidate.direction,
         scenario: candidate.scenario,
         entryPrice: candidate.entryPrice,
-        targetPrice: candidate.targetPrice,
-        stopPrice: candidate.stopPrice,
-        targetPercent: candidate.targetPercent,
-        stopPercent: candidate.stopPercent,
+        targetPrice,
+        stopPrice,
+        targetPercent,
+        stopPercent,
+        rewardRisk,
+        relativeVolume: candidate.relativeVolume,
+        retracement: candidate.fibonacci?.retracement ?? null,
+        momentumPercent: candidate.direction === "BUY" ? momentum : -momentum,
+        bodyRatio,
+        rsi: indicators.rsi,
+        atrPercent: indicators.atrPercent,
+        trendAligned: indicators.trendAligned,
         confidence: candidate.confidence,
         outcome,
         outcomePercent,

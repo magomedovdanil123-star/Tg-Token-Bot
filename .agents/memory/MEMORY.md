@@ -6,3 +6,4 @@
 - [Paper signal evaluation](paper-signal-evaluation.md) — paper results include round-trip costs and resolve same-candle TP/SL ambiguity conservatively as a loss.
 - [Wave signal display](wave-signal-display.md) — wave UI should show current structures directly, report the total, and display up to five highest-confidence signals without a minimum analogue count.
 - [Wave monthly backtest](wave-monthly-backtest.md) — fixed 100k per signal is separate from total bank; report realized P&L and open-position mark-to-market separately.
+- [Wave causal validation](wave-causal-validation.md) — confirmed pivots must be accumulated online; full-series pivot replacement creates look-ahead and falsely inflates wave win rate.
