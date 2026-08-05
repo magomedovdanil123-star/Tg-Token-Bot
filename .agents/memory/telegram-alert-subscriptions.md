@@ -7,4 +7,4 @@ Background scanning and Telegram delivery are separate concerns. A scanner can r
 
 **Why:** The bot was actively refreshing MOEX data and running both Smart Money and Money Test cycles, but ordinary Smart Money had no outbound notification path while Money Test already had one.
 
-**How to apply:** When adding or changing a background alert stream, verify all three pieces together: scan cadence, new-record detection, and persisted chat subscription/delivery. Keep alert eligibility tied to recorded new candidates; do not weaken strategy filters merely to make notifications appear.
+**How to apply:** When adding or changing an alert stream, verify scan cadence, new-record detection, and persisted chat subscription/delivery. Manual scans must also call the notifier after recording. Keep alert eligibility tied to recorded new candidates; do not weaken strategy filters merely to make notifications appear.
