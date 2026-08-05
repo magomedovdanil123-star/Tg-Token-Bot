@@ -24,6 +24,10 @@ import {
   type ElliottCandidate,
   type ElliottScanResult,
 } from "./elliott-wave-scanner";
+import {
+  scanSmartMoney,
+  type SmartMoneyCandidate,
+} from "./smart-money-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
@@ -36,6 +40,7 @@ const ACCURACY_BUTTON = "📊 Точность сигналов";
 const INTRADAY_BUTTON = "⚡ Внутри дня";
 const WAVES_BUTTON = "🌊 Волновой анализ";
 const WAVE_STATS_BUTTON = "📒 Статистика волн";
+const SMART_MONEY_BUTTON = "💰 Smart Money";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
@@ -71,6 +76,7 @@ const TELEGRAM_MENU = {
     [ANALOG_BUTTON],
     [INTRADAY_BUTTON],
     [WAVES_BUTTON],
+    [SMART_MONEY_BUTTON],
     [WAVE_STATS_BUTTON],
     [ACCURACY_BUTTON],
     ["📈 Состояние рынка", "❓ Помощь"],
@@ -82,9 +88,11 @@ let researchRefreshRunning = false;
 let latestMarketRefresh: Promise<void> | null = null;
 let latestIntradayRefresh: Promise<void> | null = null;
 let latestWaveRefresh: Promise<void> | null = null;
+let latestSmartMoneyHigherRefresh: Promise<void> | null = null;
 let paperEvaluationRunning = false;
 let intradayScanRunning = false;
 let waveScanRunning = false;
+let smartMoneyScanRunning = false;
 
 type PaperRecordResult = "recorded" | "duplicate" | "risk_limit";
 type TelegramMessage = {
@@ -382,7 +390,7 @@ async function recordPaperSignal(input: {
   reasons: string[];
   patternIds: number[];
   combinationIds: number[];
-  source: "telegram" | "top" | "intraday" | "wave";
+  source: "telegram" | "top" | "intraday" | "wave" | "smartmoney";
   timeframe?: string;
   metadata?: Record<string, unknown>;
   bypassRiskLimits?: boolean;
@@ -404,6 +412,9 @@ async function recordPaperSignal(input: {
     .limit(1);
   if (existing.length) return "duplicate";
 
+  const riskScope = input.source === "smartmoney"
+    ? sql`AND metadata ->> 'source' = 'smartmoney'`
+    : sql``;
   const limits = input.bypassRiskLimits
     ? null
     : await db.execute(sql`
@@ -415,6 +426,7 @@ async function recordPaperSignal(input: {
       ), 0)::double precision AS daily_result
     FROM signals_history
     WHERE metadata ->> 'paperTrading' = 'true'
+      ${riskScope}
   `);
   if (limits) {
     const limitRow = (limits.rows[0] ?? {}) as Record<string, unknown>;
@@ -2171,6 +2183,7 @@ function helpText() {
     "",
     "Команды:",
     "/intraday — внутридневной сканер IMOEX",
+    "/smartmoney — Smart Money: SMC-сетапы с подтверждением",
     "/waves — волны Эллиотта, ABC и Fibonacci",
     "/wave_stats — ручная статистика волновых сигналов",
     "/wave_result ID результат — записать результат сигнала",
@@ -2185,6 +2198,16 @@ function helpText() {
     "Данные: исторические свечи MOEX и рассчитанные признаки.",
     `Для полного обновления нажмите «${REFRESH_BUTTON}».`,
   ].join("\n");
+}
+
+function isSmartMoneyRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === SMART_MONEY_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "smart money" ||
+    normalizedText === "смарт мани" ||
+    normalizedText === "/smartmoney"
+  );
 }
 
 function isIntradayRequest(text: string) {
@@ -2244,6 +2267,46 @@ function intradayCandidateText(candidate: IntradayCandidate, index: number) {
     ...candidate.reasons.map((reason) => `• ${reason}`),
     "Стакан: не используется — публичный MOEX endpoint не отдал orderbook",
     "Режим: PAPER TRADING — реальные сделки не совершаются",
+  ].join("\n");
+}
+
+function smartMoneyCandidateText(candidate: SmartMoneyCandidate, index: number) {
+  const isLong = candidate.direction === "BUY";
+  const direction = isLong ? "LONG" : "SHORT";
+  const sign = isLong ? "+" : "-";
+  const stopSign = isLong ? "-" : "+";
+  return [
+    `${index}. ${isLong ? "📈" : "📉"} ${direction} · ${candidate.ticker}`,
+    `Рейтинг: ${candidate.score}/100 · адаптивный порог: ${candidate.threshold}`,
+    `Вероятность сетапа: ${candidate.probability}%`,
+    `Таймфреймы: ${candidate.timeframe}`,
+    "",
+    `Вход: ${formatNumber(candidate.entryPrice)}`,
+    `Stop Loss: ${formatNumber(candidate.stopPrice)} (${stopSign}${formatNumber(Math.abs((candidate.stopPrice - candidate.entryPrice) / candidate.entryPrice * 100), 2)}%)`,
+    `Take Profit 1: ${formatNumber(candidate.takeProfit1)} (${sign}${formatNumber(Math.abs((candidate.takeProfit1 - candidate.entryPrice) / candidate.entryPrice * 100), 2)}%)`,
+    `Take Profit 2: ${formatNumber(candidate.takeProfit2)} (${sign}${formatNumber(Math.abs((candidate.takeProfit2 - candidate.entryPrice) / candidate.entryPrice * 100), 2)}%)`,
+    `Take Profit 3: ${formatNumber(candidate.takeProfit3)} (${sign}${formatNumber(Math.abs((candidate.takeProfit3 - candidate.entryPrice) / candidate.entryPrice * 100), 2)}%)`,
+    `Risk / Reward: 1:${formatNumber(candidate.rewardRisk, 2)}`,
+    "",
+    `Накопление: ${candidate.accumulation.strength} · ${candidate.accumulation.score} баллов`,
+    `Диапазон накопления: ${formatNumber(candidate.accumulation.rangeLow)}–${formatNumber(candidate.accumulation.rangeHigh)}`,
+    `Сжатие ATR: ${formatNumber(candidate.accumulation.atrCompression * 100, 0)}% · тестов уровня: ${candidate.accumulation.levelTests}`,
+    `Структура: ${candidate.structure.bos ?? "BOS"} · ${candidate.structure.choch ?? "CHoCH"}`,
+    `Ликвидность: ${candidate.liquidity.length ? candidate.liquidity.join(", ") : "подтверждена структурой"}`,
+    `Order Block: ${candidate.orderBlock ?? "не найден"}`,
+    `FVG: ${candidate.fairValueGap ?? "не найден"}`,
+    `Объём: ${candidate.volumeConfirmed ? "подтверждён" : "не подтверждён"} · ретест: ${candidate.retestConfirmed ? "подтверждён" : "не подтверждён"}`,
+    `Согласование старших ТФ: ${candidate.higherTimeframeAgreement.join(", ")}`,
+    "",
+    "Причины:",
+    ...candidate.reasons.map((reason) => `✅ ${reason}`),
+    "",
+    "График close / уровни:",
+    candidate.chart,
+    "",
+    `Свеча: ${formatDate(candidate.timestamp)}`,
+    "Режим: PAPER TRADING — реальные деньги не используются.",
+    "Сигнал не является финансовой рекомендацией.",
   ].join("\n");
 }
 
@@ -2547,6 +2610,182 @@ async function intradayText() {
       "Не удалось получить актуальные котировки MOEX.",
       "Сигналы не формирую, чтобы не использовать старые данные.",
     ].join("\n");
+  }
+}
+
+async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
+  let recorded = 0;
+  let duplicates = 0;
+  let blocked = 0;
+  for (const candidate of candidates) {
+    const result = await recordPaperSignal({
+      ticker: candidate.ticker,
+      featureTimestamp: candidate.timestamp,
+      direction: candidate.direction,
+      confidence: candidate.score,
+      entryPrice: candidate.entryPrice,
+      stopPrice: candidate.stopPrice,
+      targetPrice: candidate.takeProfit2,
+      horizonMinutes: 360,
+      reasons: candidate.reasons,
+      patternIds: [],
+      combinationIds: [],
+      source: "smartmoney",
+      timeframe: "15m",
+      metadata: {
+        smartMoney: true,
+        timeframe: "1m",
+        strategy: "SMC-Accumulation-BOS-CHoCH",
+        probability: candidate.probability,
+        adaptiveThreshold: candidate.threshold,
+        rewardRisk: candidate.rewardRisk,
+        takeProfit1: candidate.takeProfit1,
+        takeProfit2: candidate.takeProfit2,
+        takeProfit3: candidate.takeProfit3,
+        accumulation: candidate.accumulation,
+        structure: candidate.structure,
+        liquidity: candidate.liquidity,
+        orderBlock: candidate.orderBlock,
+        fairValueGap: candidate.fairValueGap,
+        volumeConfirmed: candidate.volumeConfirmed,
+        retestConfirmed: candidate.retestConfirmed,
+        higherTimeframeAgreement: candidate.higherTimeframeAgreement,
+        chart: candidate.chart,
+      },
+    });
+    if (result === "recorded") recorded += 1;
+    else if (result === "duplicate") duplicates += 1;
+    else blocked += 1;
+  }
+  return { recorded, duplicates, blocked };
+}
+
+async function smartMoneyText() {
+  try {
+    await refreshLatestIntradayData();
+    await ensureSmartMoneyHigherTimeframes();
+    const scan = await scanSmartMoney();
+    const records = await recordSmartMoneyCandidates(scan.candidates);
+    const blocks = scan.candidates.map((candidate, index) =>
+      smartMoneyCandidateText(candidate, index + 1),
+    );
+    return [
+      "💰 SMART MONEY · SMC IMOEX",
+      "",
+      `Проверено акций: ${scan.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
+      `Адаптивный минимальный рейтинг: ${formatNumber(scan.threshold, 0)}/100`,
+      "Фильтр: накопление + BOS + CHoCH + объём + HTF alignment + R:R ≥ 1:2.",
+      `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates} · заблокировано риск-фильтром: ${records.blocked}`,
+      "",
+      ...(blocks.length
+        ? blocks.flatMap((block) => [block, ""])
+        : [
+            "Свежих Smart Money-сетапов нет.",
+            "",
+            "Сигнал не создаётся, если отсутствует подтверждённое накопление, BOS/CHoCH, объём, согласование старших таймфреймов или R:R ниже 1:2.",
+          ]),
+      scan.unavailable.length
+        ? `Недоступны для оценки: ${scan.unavailable.slice(0, 5).join("; ")}${scan.unavailable.length > 5 ? " и другие" : ""}`
+        : "Все тикеры имеют достаточную историю для проверки.",
+      "",
+      "Режим: PAPER TRADING — реальные деньги не используются.",
+      "Smart Money — исследовательская стратегия, не финансовая рекомендация.",
+    ].join("\n");
+  } catch (error) {
+    logger.error({ err: error }, "Smart Money scan failed");
+    return [
+      "💰 SMART MONEY · SMC IMOEX",
+      "",
+      "Не удалось завершить Smart Money-сканирование.",
+      "Сигналы не формирую, чтобы не использовать неполные данные.",
+    ].join("\n");
+  }
+}
+
+function ensureSmartMoneyHigherTimeframes() {
+  if (latestSmartMoneyHigherRefresh) return latestSmartMoneyHigherRefresh;
+  latestSmartMoneyHigherRefresh = (async () => {
+    if (latestWaveRefresh) await latestWaveRefresh;
+    const latest = await db.execute(sql`
+      SELECT MAX(timestamp) AS latest
+      FROM candles
+      WHERE timeframe = '1h'
+    `);
+    const rawLatest = (latest.rows[0] as { latest?: unknown } | undefined)?.latest;
+    const latestTimestamp =
+      rawLatest instanceof Date ? rawLatest : rawLatest ? new Date(String(rawLatest)) : null;
+    const isFresh =
+      latestTimestamp !== null &&
+      Number.isFinite(latestTimestamp.getTime()) &&
+      Date.now() - latestTimestamp.getTime() <= 90 * 60_000;
+    if (isFresh) return;
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        "pnpm",
+        [
+          "--filter",
+          "@workspace/scripts",
+          "run",
+          "download-moex",
+          "--",
+          "--latest-only=true",
+          "--timeframe=1h",
+          "--days=5",
+        ],
+        {
+          cwd: process.cwd(),
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      child.stdout.on("data", (chunk: Buffer) => {
+        logger.info({ output: chunk.toString().trim() }, "Smart Money 1h refresh output");
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        logger.warn({ output: chunk.toString().trim() }, "Smart Money 1h refresh error output");
+      });
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `Smart Money 1h refresh exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`,
+            ),
+          );
+        }
+      });
+    });
+  })().finally(() => {
+    latestSmartMoneyHigherRefresh = null;
+  });
+  return latestSmartMoneyHigherRefresh;
+}
+
+async function runSmartMoneyScanCycle() {
+  if (smartMoneyScanRunning) return;
+  smartMoneyScanRunning = true;
+  try {
+    await refreshLatestIntradayData();
+    await ensureSmartMoneyHigherTimeframes();
+    const scan = await scanSmartMoney();
+    const records = await recordSmartMoneyCandidates(scan.candidates);
+    logger.info(
+      {
+        analyzed: scan.analyzed,
+        candidates: scan.candidates.length,
+        recorded: records.recorded,
+        duplicates: records.duplicates,
+        blocked: records.blocked,
+      },
+      "Smart Money scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Smart Money scan cycle skipped");
+  } finally {
+    smartMoneyScanRunning = false;
   }
 }
 
@@ -3323,6 +3562,9 @@ async function handleMessage(chatId: number, text: string) {
   if (isIntradayRequest(text)) {
     return intradayText();
   }
+  if (isSmartMoneyRequest(text)) {
+    return smartMoneyText();
+  }
   if (isWavesRequest(text)) {
     return wavesText();
   }
@@ -3457,6 +3699,9 @@ export function startTelegramBot() {
   const waveScanTimer = setInterval(() => {
     void runWaveScanCycle();
   }, WAVE_SCAN_INTERVAL_MS);
+  const smartMoneyScanTimer = setInterval(() => {
+    void runSmartMoneyScanCycle();
+  }, INTRADAY_SCAN_INTERVAL_MS);
   const paperEvaluationTimer = setInterval(() => {
     if (paperEvaluationRunning) return;
     paperEvaluationRunning = true;
@@ -3474,6 +3719,7 @@ export function startTelegramBot() {
     controller.abort();
     clearInterval(intradayScanTimer);
     clearInterval(waveScanTimer);
+    clearInterval(smartMoneyScanTimer);
     clearInterval(paperEvaluationTimer);
   };
 
@@ -3487,6 +3733,7 @@ export function startTelegramBot() {
           { command: "imoex", description: "Состав индекса IMOEX" },
           { command: "market", description: "Состояние рынка" },
           { command: "intraday", description: "Внутридневной сканер IMOEX" },
+          { command: "smartmoney", description: "Smart Money SMC-сетапы IMOEX" },
           { command: "waves", description: "Волны Эллиотта и Fibonacci" },
           { command: "wave_stats", description: "Статистика волновых сигналов" },
           { command: "top", description: "Лучшие сигналы" },
@@ -3498,6 +3745,7 @@ export function startTelegramBot() {
       );
       logger.info({ username: me.username ?? "unknown" }, "Telegram bot connected");
       void runIntradayScanCycle();
+      void runSmartMoneyScanCycle();
       void runWaveScanCycle();
 
       while (running) {
