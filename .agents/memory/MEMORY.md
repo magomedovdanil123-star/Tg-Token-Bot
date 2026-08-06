@@ -15,3 +15,4 @@
 - [Money Test control group](money-test-control.md) — experimental intraday filters and two-minute position monitoring must stay isolated from production Smart Money.
 - [Telegram alert subscriptions](telegram-alert-subscriptions.md) — background scanners need an explicit subscribed chat set; scanning alone does not deliver alerts.
 - [Timeweb deployment](timeweb-deployment.md) — Timeweb host has port 8080 occupied; Invest AI uses 8099 and needs a GitHub deploy key plus Telegram token.
+- [Hidden signal learning](learning-evaluation.md) — background paper-signal evaluation uses independent fixed ±1.5% controls and never changes live rules or Telegram UI.

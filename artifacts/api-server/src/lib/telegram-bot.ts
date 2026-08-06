@@ -54,6 +54,7 @@ const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
+const LEARNING_EVALUATION_INTERVAL_MS = 2 * 60 * 1000;
 const INTRADAY_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const COMMODITY_SCAN_INTERVAL_MS = 3 * 60 * 1000;
 const MONEY_TEST_SCAN_INTERVAL_MS = 2 * 60 * 1000;
@@ -62,6 +63,9 @@ const PAPER_COMMISSION_ONE_WAY_PERCENT = 0.05;
 const PAPER_SLIPPAGE_ONE_WAY_PERCENT = 0.05;
 const PAPER_TRANSACTION_COST_PERCENT =
   (PAPER_COMMISSION_ONE_WAY_PERCENT + PAPER_SLIPPAGE_ONE_WAY_PERCENT) * 2;
+const LEARNING_VERSION = "fixed-1.5-v1";
+const LEARNING_TARGET_PERCENT = 1.5;
+const LEARNING_STOP_PERCENT = 1.5;
 const PAPER_MAX_ACTIVE_SIGNALS = 5;
 const PAPER_MAX_DAILY_LOSS_PERCENT = 2;
 const SMART_MONEY_1M_MAX_AGE_MS = 15 * 60 * 1000;
@@ -99,6 +103,7 @@ let latestWaveRefresh: Promise<void> | null = null;
 let latestSmartMoneyHigherRefresh: Promise<void> | null = null;
 const companyAnalysisRefreshes = new Map<string, Promise<void>>();
 let paperEvaluationRunning = false;
+let learningEvaluationRunning = false;
 let intradayScanRunning = false;
 let waveScanRunning = false;
 let smartMoneyScanRunning = false;
@@ -528,6 +533,10 @@ async function recordPaperSignal(input: {
     metadata: {
       source: input.source,
       paperTrading: true,
+      learningVersion: LEARNING_VERSION,
+      learningTargetPercent: LEARNING_TARGET_PERCENT,
+      learningStopPercent: LEARNING_STOP_PERCENT,
+      learningStatus: "pending",
       ...input.metadata,
     },
   });
@@ -692,6 +701,245 @@ async function evaluatePaperSignals() {
           AND outcome IS NULL
       `);
     }
+  }
+}
+
+async function evaluateLearningSignals() {
+  const pending = await db.execute(sql`
+    SELECT
+      id,
+      ticker,
+      direction,
+      confidence,
+      entry_price AS "entryPrice",
+      stop_price AS "stopPrice",
+      target_price AS "targetPrice",
+      timestamp AS "candleTimestamp",
+      horizon_minutes AS "horizonMinutes",
+      metadata,
+      reasons,
+      outcome,
+      outcome_percent AS "outcomePercent"
+    FROM signals_history
+    WHERE metadata ->> 'paperTrading' = 'true'
+      AND COALESCE(metadata ->> 'learningStatus', 'pending') = 'pending'
+    ORDER BY id
+    LIMIT 500
+  `);
+
+  let evaluated = 0;
+  let waiting = 0;
+
+  for (const rawRow of pending.rows) {
+    const row = rawRow as Record<string, unknown>;
+    const id = Number(row.id);
+    const ticker = String(row.ticker);
+    const direction = String(row.direction);
+    const confidence = Number(row.confidence);
+    const entryPrice = Number(row.entryPrice);
+    const originalStopPrice = Number(row.stopPrice);
+    const originalTargetPrice = Number(row.targetPrice);
+    const candleTimestamp =
+      row.candleTimestamp instanceof Date
+        ? row.candleTimestamp
+        : new Date(String(row.candleTimestamp));
+    const metadata =
+      row.metadata && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : {};
+    const reasons =
+      Array.isArray(row.reasons) ? row.reasons : null;
+    const operationalOutcome =
+      typeof row.outcome === "string" ? row.outcome : null;
+    const operationalOutcomePercent =
+      row.outcomePercent === null || row.outcomePercent === undefined
+        ? null
+        : Number(row.outcomePercent);
+    const horizonMinutes = Number(row.horizonMinutes) || PAPER_HORIZON_MINUTES;
+    const candleTimeframe =
+      typeof metadata.executionTimeframe === "string"
+        ? metadata.executionTimeframe
+        : typeof metadata.timeframe === "string"
+          ? metadata.timeframe
+          : TIMEFRAME;
+
+    if (
+      !Number.isFinite(id) ||
+      !Number.isFinite(entryPrice) ||
+      !Number.isFinite(candleTimestamp.getTime()) ||
+      (direction !== "BUY" && direction !== "SELL")
+    ) {
+      continue;
+    }
+
+    const learningTargetPrice =
+      direction === "BUY"
+        ? entryPrice * (1 + LEARNING_TARGET_PERCENT / 100)
+        : entryPrice * (1 - LEARNING_TARGET_PERCENT / 100);
+    const learningStopPrice =
+      direction === "BUY"
+        ? entryPrice * (1 - LEARNING_STOP_PERCENT / 100)
+        : entryPrice * (1 + LEARNING_STOP_PERCENT / 100);
+    const deadline = new Date(candleTimestamp.getTime() + horizonMinutes * 60_000);
+    const candlesResult = await db.execute(sql`
+      SELECT timestamp, high, low, close
+      FROM candles
+      WHERE ticker = ${ticker}
+        AND timeframe = ${candleTimeframe}
+        AND timestamp > ${candleTimestamp}
+        AND timestamp <= ${deadline}
+      ORDER BY timestamp
+    `);
+
+    if (!candlesResult.rows.length) {
+      waiting += 1;
+      continue;
+    }
+
+    let maxFavorablePercent = 0;
+    let maxAdversePercent = 0;
+    let outcome: "target" | "stop" | "both_same_candle" | "timeout" | null = null;
+    let outcomeAt: Date | null = null;
+    let lastClose: number | null = null;
+    let lastTimestamp: Date | null = null;
+    let barsChecked = 0;
+
+    for (const rawCandle of candlesResult.rows) {
+      const candle = rawCandle as Record<string, unknown>;
+      const timestamp =
+        candle.timestamp instanceof Date
+          ? candle.timestamp
+          : new Date(String(candle.timestamp));
+      const high = Number(candle.high);
+      const low = Number(candle.low);
+      const close = Number(candle.close);
+      if (
+        !Number.isFinite(timestamp.getTime()) ||
+        !Number.isFinite(high) ||
+        !Number.isFinite(low) ||
+        !Number.isFinite(close)
+      ) {
+        continue;
+      }
+
+      barsChecked += 1;
+      lastClose = close;
+      lastTimestamp = timestamp;
+      const favorablePercent =
+        direction === "BUY"
+          ? ((high - entryPrice) / entryPrice) * 100
+          : ((entryPrice - low) / entryPrice) * 100;
+      const adversePercent =
+        direction === "BUY"
+          ? ((entryPrice - low) / entryPrice) * 100
+          : ((high - entryPrice) / entryPrice) * 100;
+      maxFavorablePercent = Math.max(maxFavorablePercent, favorablePercent);
+      maxAdversePercent = Math.max(maxAdversePercent, adversePercent);
+
+      const hitTarget =
+        direction === "BUY"
+          ? high >= learningTargetPrice
+          : low <= learningTargetPrice;
+      const hitStop =
+        direction === "BUY"
+          ? low <= learningStopPrice
+          : high >= learningStopPrice;
+      if (hitTarget || hitStop) {
+        outcome =
+          hitTarget && hitStop
+            ? "both_same_candle"
+            : hitTarget
+              ? "target"
+              : "stop";
+        outcomeAt = timestamp;
+        break;
+      }
+    }
+
+    if (
+      outcome === null &&
+      lastClose !== null &&
+      lastTimestamp !== null &&
+      lastTimestamp.getTime() >= deadline.getTime()
+    ) {
+      outcome = "timeout";
+      outcomeAt = lastTimestamp;
+    }
+
+    if (!outcome || !outcomeAt) {
+      waiting += 1;
+      continue;
+    }
+
+    const elapsedMinutes = Math.max(
+      0,
+      (outcomeAt.getTime() - candleTimestamp.getTime()) / 60_000,
+    );
+    const learningResult =
+      outcome === "target"
+        ? "TARGET_1_5_FIRST"
+        : outcome === "stop"
+          ? "STOP_1_5_FIRST"
+          : outcome === "both_same_candle"
+            ? "BOTH_LEVELS_SAME_CANDLE_CONSERVATIVE_STOP"
+            : "TIMEOUT";
+    const learningAnalysis = {
+      source: metadata.source ?? "unknown",
+      strategy: metadata.strategy ?? metadata.strategyFamily ?? null,
+      reasons,
+      confidence: Number.isFinite(confidence) ? confidence : null,
+      entryPrice,
+      originalStopPrice: Number.isFinite(originalStopPrice)
+        ? originalStopPrice
+        : null,
+      originalTargetPrice: Number.isFinite(originalTargetPrice)
+        ? originalTargetPrice
+        : null,
+      operationalOutcome,
+      operationalOutcomePercent: Number.isFinite(operationalOutcomePercent)
+        ? operationalOutcomePercent
+        : null,
+      operationalEvent: metadata.moneyTestLastEvent ?? metadata.commodityLastEvent ?? null,
+      operationalEventReason:
+        metadata.moneyTestLastEventReason ?? metadata.commodityLastEventReason ?? null,
+      score: metadata.score ?? metadata.probability ?? null,
+      threshold: metadata.adaptiveThreshold ?? null,
+      marketRegime: metadata.marketRegime ?? null,
+      marketDirectionAtEntry: metadata.marketDirectionAtEntry ?? null,
+      higherTimeframeAgreement: metadata.higherTimeframeAgreement ?? null,
+      volumeConfirmed: metadata.volumeConfirmed ?? null,
+      retestConfirmed: metadata.retestConfirmed ?? null,
+      bosQuality: metadata.bosQuality ?? null,
+      rangeToAtr: metadata.rangeToAtr ?? null,
+      rewardRisk: metadata.rewardRisk ?? null,
+      netRewardRisk: metadata.netRewardRisk ?? null,
+    };
+
+    await db.execute(sql`
+      UPDATE signals_history
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({
+        learningStatus: "evaluated",
+        learningResult,
+        learningOutcomeAt: outcomeAt.toISOString(),
+        learningElapsedMinutes: Number(elapsedMinutes.toFixed(2)),
+        learningTargetPercent: LEARNING_TARGET_PERCENT,
+        learningStopPercent: LEARNING_STOP_PERCENT,
+        learningMaxFavorablePercent: Number(maxFavorablePercent.toFixed(4)),
+        learningMaxAdversePercent: Number(maxAdversePercent.toFixed(4)),
+        learningBarsChecked: barsChecked,
+        learningAnalysis,
+      })}::jsonb
+      WHERE id = ${id}
+        AND COALESCE(metadata ->> 'learningStatus', 'pending') = 'pending'
+    `);
+    evaluated += 1;
+  }
+
+  if (evaluated || waiting) {
+    logger.info(
+      { evaluated, waiting },
+      "Background signal learning evaluation completed",
+    );
   }
 }
 
@@ -5240,6 +5488,17 @@ export function startTelegramBot() {
         paperEvaluationRunning = false;
       });
   }, PAPER_EVALUATION_INTERVAL_MS);
+  const learningEvaluationTimer = setInterval(() => {
+    if (learningEvaluationRunning) return;
+    learningEvaluationRunning = true;
+    void evaluateLearningSignals()
+      .catch((error) => {
+        logger.error({ err: error }, "Background signal learning evaluation failed");
+      })
+      .finally(() => {
+        learningEvaluationRunning = false;
+      });
+  }, LEARNING_EVALUATION_INTERVAL_MS);
 
   const stop = () => {
     running = false;
@@ -5250,6 +5509,7 @@ export function startTelegramBot() {
     clearInterval(commodityScanTimer);
     clearInterval(moneyTestScanTimer);
     clearInterval(paperEvaluationTimer);
+    clearInterval(learningEvaluationTimer);
     smartMoneyNotifier = null;
     commodityNotifier = null;
     moneyTestNotifier = null;
@@ -5286,6 +5546,9 @@ export function startTelegramBot() {
       void runCommodityScanCycle();
       void runMoneyTestScanCycle();
       void runWaveScanCycle();
+      void evaluateLearningSignals().catch((error) => {
+        logger.error({ err: error }, "Background signal learning evaluation failed");
+      });
 
       while (running) {
         try {
