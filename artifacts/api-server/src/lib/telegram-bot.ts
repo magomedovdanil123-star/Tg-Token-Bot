@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
@@ -4643,12 +4643,13 @@ async function companyAnalysisPicker() {
       shortName: moexTickers.shortName,
     })
     .from(moexTickers)
-    .where(eq(moexTickers.isActive, true))
-    .orderBy(asc(moexTickers.rank));
-  const known = new Map(rows.map((row) => [row.ticker, row]));
-  if (!known.has("WUSH")) {
-    rows.push({ ticker: "WUSH", shortName: "ВУШ Холдинг" });
-  }
+    .where(
+      or(
+        eq(moexTickers.isActive, true),
+        inArray(moexTickers.secid, [...SMART_MONEY_TICKERS]),
+      ),
+    )
+    .orderBy(asc(moexTickers.rank), asc(moexTickers.secid));
   const buttons = rows.map((row) => ({
     text: row.shortName
       ? `${row.ticker} — ${row.shortName.slice(0, 18)}`
@@ -4657,8 +4658,9 @@ async function companyAnalysisPicker() {
   }));
   return {
     text: [
-      "🔎 Выберите компанию для Smart Money-проверки.",
+      `🔎 Выберите компанию для Smart Money-проверки (${rows.length} акций).`,
       "",
+      "В списке: IMOEX, добавленные акции 2-го эшелона, OZON и Озон Фармацевтика.",
       "Можно также отправить команду /analysis ТИКЕР или название компании.",
       "Например: /analysis WUSH или /analysis ВУШ",
     ].join("\n"),
@@ -4669,6 +4671,33 @@ async function companyAnalysisPicker() {
       ),
     },
   };
+}
+
+function companySmartMoneyNoEntryText(
+  ticker: string,
+  scan: Awaited<ReturnType<typeof scanSmartMoney>>,
+) {
+  const diagnostic = scan.diagnostics.find((item) => item.ticker === ticker);
+  const reasons = diagnostic?.reasons.length
+    ? diagnostic.reasons
+    : scan.unavailable
+        .filter((item) => item.startsWith(`${ticker}:`))
+        .map((item) => item.slice(ticker.length + 1));
+  return [
+    `🔎 ${ticker} · Smart Money`,
+    "",
+    "Сигнал не сформирован.",
+    "Акция проверена по той же логике Smart Money, что и обычные сигналы.",
+    "",
+    diagnostic?.score !== null && diagnostic?.score !== undefined
+      ? `Рейтинг: ${diagnostic.score}/100 · порог: ${diagnostic.threshold}`
+      : "Рейтинг: недостаточно данных для расчёта",
+    "Причины:",
+    ...(reasons.length ? reasons.map((reason) => `• ${reason}`) : ["• Подходящий сетап пока не найден."]),
+    "",
+    "Новый сигнал появится только после прохождения всех базовых фильтров Smart Money.",
+    "Старые или неполные данные не используются.",
+  ].join("\n");
 }
 
 async function researchResultsText() {
@@ -5399,8 +5428,11 @@ async function companyAnalysisText(input: string, chatId?: number) {
     const smartScan = await scanSmartMoney(ticker);
     const candidate = smartScan.candidates.find((item) => item.ticker === ticker);
     if (!candidate) {
-      logger.info({ ticker }, "Company Smart Money has no entry");
-      return "";
+      logger.info(
+        { ticker, diagnostic: smartScan.diagnostics.find((item) => item.ticker === ticker) },
+        "Company Smart Money has no entry",
+      );
+      return companySmartMoneyNoEntryText(ticker, smartScan);
     }
     await recordSmartMoneyCandidates([candidate]);
     return smartMoneyCandidateText(candidate, 1, chatId);
