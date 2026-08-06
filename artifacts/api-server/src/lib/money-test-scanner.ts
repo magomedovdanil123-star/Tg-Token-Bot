@@ -192,11 +192,19 @@ export async function scanMoneyTest(): Promise<MoneyTestScan> {
       );
     }
     if (
-      !candidate.retestConfirmed &&
-      !candidate.orderBlock &&
-      !candidate.fairValueGap
+      !candidate.retestConfirmed
     ) {
-      reasons.push("Нет качественной точки входа возле OB/FVG или подтверждённого ретеста.");
+      reasons.push("Нет подтверждённого ретеста уровня.");
+    }
+    if (candidate.netRewardRisk < 2) {
+      reasons.push(`Недостаточный net R:R: ${candidate.netRewardRisk.toFixed(2)}. Нужно минимум 2.00.`);
+    }
+    if (
+      !candidate.higherTimeframeAgreement.some(
+        (timeframe) => timeframe === "4H" || timeframe === "1D",
+      )
+    ) {
+      reasons.push("Нет подтверждения направления на 4H или 1D.");
     }
     if (!candidate.volumeConfirmed) {
       reasons.push("Нет подтверждения объёмом.");

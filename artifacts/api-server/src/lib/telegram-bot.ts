@@ -53,6 +53,7 @@ const MONEY_TEST_BUTTON = "💵 Деньги тест";
 const COMPANY_ANALYSIS_BUTTON = "🔎 Аналитика компании";
 const AVERAGING_BUTTON = "📐 Усреднение / банк";
 const SIGNAL_MAX_AGE_MINUTES = 30;
+const ENTRY_EXIT_GRACE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
@@ -3323,7 +3324,7 @@ async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
     scan.base.diagnostics.map((diagnostic) => [diagnostic.ticker, diagnostic.direction]),
   );
   const active = await db.execute(sql`
-    SELECT id, ticker, direction, entry_price, stop_price, metadata
+    SELECT id, ticker, direction, entry_price, stop_price, generated_at, metadata
     FROM signals_history
     WHERE outcome IS NULL
       AND metadata ->> 'source' = 'money-test'
@@ -3336,6 +3337,8 @@ async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
     const direction = String(row.direction);
     const entry = Number(row.entry_price);
     const stop = Number(row.stop_price);
+    const generatedAt =
+      row.generated_at instanceof Date ? row.generated_at : new Date(String(row.generated_at));
     const metadata =
       row.metadata && typeof row.metadata === "object"
         ? (row.metadata as Record<string, unknown>)
@@ -3367,6 +3370,10 @@ async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
     ) {
       continue;
     }
+    const ageMinutes =
+      Number.isFinite(generatedAt.getTime())
+        ? (timestamp.getTime() - generatedAt.getTime()) / 60_000
+        : Number.POSITIVE_INFINITY;
     const target1 = Number(metadata.takeProfit1);
     const target2 = Number(metadata.takeProfit2);
     const target3 = Number(metadata.takeProfit3);
@@ -3406,8 +3413,11 @@ async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
         timestamp,
       };
     } else if (
-      (currentMarketDirection === "BUY" && direction === "SELL") ||
-      (currentMarketDirection === "SELL" && direction === "BUY")
+      ageMinutes >= ENTRY_EXIT_GRACE_MINUTES &&
+      (
+        (currentMarketDirection === "BUY" && direction === "SELL") ||
+        (currentMarketDirection === "SELL" && direction === "BUY")
+      )
     ) {
       event = {
         kind: "EXIT",
@@ -3416,6 +3426,7 @@ async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
         timestamp,
       };
     } else if (
+      ageMinutes >= ENTRY_EXIT_GRACE_MINUTES &&
       currentMarketDirection === "NEUTRAL" &&
       (entryMarketDirection === "BUY" || entryMarketDirection === "SELL") &&
       lastEvent !== "market_reduce"
@@ -3426,14 +3437,22 @@ async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
         price,
         timestamp,
       };
-    } else if (volumeRatio !== null && volumeRatio < 0.65 && lastEvent !== "volume_reduce") {
+    } else if (
+      ageMinutes >= ENTRY_EXIT_GRACE_MINUTES &&
+      volumeRatio !== null &&
+      volumeRatio < 0.65 &&
+      lastEvent !== "volume_reduce"
+    ) {
       event = {
         kind: "REDUCE",
         reason: `объём/ликвидность снизились до ${volumeRatio.toFixed(2)}x базового уровня`,
         price,
         timestamp,
       };
-    } else if (liveDirections.get(ticker) === null) {
+    } else if (
+      ageMinutes >= ENTRY_EXIT_GRACE_MINUTES &&
+      liveDirections.get(ticker) === null
+    ) {
       event = {
         kind: "EXIT",
         reason: "базовая SMC-структура больше не подтверждается",
@@ -3441,6 +3460,7 @@ async function runMoneyTestPositionMonitor(scan: MoneyTestScan) {
         timestamp,
       };
     } else if (
+      ageMinutes >= ENTRY_EXIT_GRACE_MINUTES &&
       liveDirections.get(ticker) &&
       liveDirections.get(ticker) !== direction
     ) {
@@ -3609,6 +3629,7 @@ async function commodityMonitorEvent(
   metadata: Record<string, unknown>,
   liveDirection: string | null | undefined,
   volumeRatio: number | null,
+  structureChecksEnabled: boolean,
 ): Promise<CommodityMonitorEvent | null> {
   const stop = Number(metadata.stopPrice);
   const target1 = Number(metadata.takeProfit1);
@@ -3642,7 +3663,7 @@ async function commodityMonitorEvent(
   if (direction === "SELL" && price >= stop) {
     return { kind: "EXIT", reason: `достигнут Stop Loss ${formatNumber(stop)}`, price, timestamp };
   }
-  if (liveDirection === null) {
+  if (structureChecksEnabled && liveDirection === null) {
     return {
       kind: "EXIT",
       reason: "Smart Money-структура больше не подтверждается",
@@ -3650,7 +3671,7 @@ async function commodityMonitorEvent(
       timestamp,
     };
   }
-  if (liveDirection !== undefined && structureDirection !== direction) {
+  if (structureChecksEnabled && liveDirection !== undefined && structureDirection !== direction) {
     return {
       kind: "EXIT",
       reason: `разворот структуры: направление стало ${structureDirection === "BUY" ? "LONG" : "SHORT"}`,
@@ -3660,7 +3681,7 @@ async function commodityMonitorEvent(
   }
 
   const lastEvent = String(metadata.commodityLastEvent ?? "");
-  if (volumeRatio !== null && volumeRatio < 0.65 && lastEvent !== "volume_reduce") {
+  if (structureChecksEnabled && volumeRatio !== null && volumeRatio < 0.65 && lastEvent !== "volume_reduce") {
     return {
       kind: "REDUCE",
       reason: `объём снизился до ${formatNumber(volumeRatio, 2)}x среднего 15m объёма`,
@@ -3707,7 +3728,7 @@ async function runCommodityPositionMonitor() {
       .map((item) => [item.ticker, item.direction]),
   );
   const active = await db.execute(sql`
-    SELECT id, ticker, direction, entry_price, stop_price, metadata
+    SELECT id, ticker, direction, entry_price, stop_price, generated_at, metadata
     FROM signals_history
     WHERE outcome IS NULL
       AND metadata ->> 'source' = 'commodity-smartmoney'
@@ -3720,6 +3741,8 @@ async function runCommodityPositionMonitor() {
     const direction = String(row.direction);
     const entryPrice = Number(row.entry_price);
     const stopPrice = Number(row.stop_price);
+    const generatedAt =
+      row.generated_at instanceof Date ? row.generated_at : new Date(String(row.generated_at));
     const metadata =
       row.metadata && typeof row.metadata === "object"
         ? (row.metadata as Record<string, unknown>)
@@ -3770,6 +3793,10 @@ async function runCommodityPositionMonitor() {
       latestVolume !== null && volumeBaseline !== null && volumeBaseline > 0
         ? latestVolume / volumeBaseline
         : null;
+    const ageMinutes =
+      Number.isFinite(generatedAt.getTime())
+        ? (timestamp.getTime() - generatedAt.getTime()) / 60_000
+        : Number.POSITIVE_INFINITY;
     const event = await commodityMonitorEvent(
       ticker,
       price,
@@ -3782,6 +3809,7 @@ async function runCommodityPositionMonitor() {
       },
       liveDirections.has(ticker) ? liveDirections.get(ticker) : undefined,
       volumeRatio,
+      ageMinutes >= ENTRY_EXIT_GRACE_MINUTES,
     );
     if (!event) continue;
     const eventKey =

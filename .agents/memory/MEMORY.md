@@ -17,3 +17,4 @@
 - [Timeweb deployment](timeweb-deployment.md) — Timeweb host has port 8080 occupied; Invest AI uses 8099 and needs a GitHub deploy key plus Telegram token.
 - [Hidden signal learning](learning-evaluation.md) — background paper-signal evaluation uses independent fixed ±1.5% controls and never changes live rules or Telegram UI.
 - [Development schema changes](dev-schema-migrations.md) — Drizzle schema conflicts can block non-interactive pushes; use the standard post-merge/publish database flow.
+- [Strict Telegram entries](strict-telegram-entries.md) — live SMC notifications require high score, retest, HTF confirmation and stronger net R:R; early structural exits have a grace period.
