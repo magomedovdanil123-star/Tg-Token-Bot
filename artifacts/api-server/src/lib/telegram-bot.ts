@@ -5977,16 +5977,27 @@ export function startTelegramBot() {
               const callbackData = callback.data ?? "";
               const callbackChatId = callback.message?.chat.id;
               try {
-                await client.answerCallbackQuery(
-                  callback.id,
-                  callbackData.startsWith("signal:")
-                    ? "Анализирую акцию..."
-                    : callbackData.startsWith("analysis:")
-                      ? "Проверяю Smart Money по акции..."
-                    : callbackData.startsWith("wave:")
-                      ? "Сохраняю результат волнового сигнала..."
-                    : undefined,
-                );
+                try {
+                  await client.answerCallbackQuery(
+                    callback.id,
+                    callbackData.startsWith("signal:")
+                      ? "Анализирую акцию..."
+                      : callbackData.startsWith("analysis:")
+                        ? "Проверяю Smart Money по акции..."
+                      : callbackData.startsWith("wave:")
+                        ? "Сохраняю результат волнового сигнала..."
+                      : undefined,
+                  );
+                } catch (error) {
+                  // A callback can be delivered after Telegram's short
+                  // acknowledgement window, especially when the bot is
+                  // refreshing MOEX candles. The analysis itself is still
+                  // valid and must not be discarded because the toast expired.
+                  logger.warn(
+                    { err: error, callbackData },
+                    "Telegram callback acknowledgement skipped",
+                  );
+                }
                 if (callbackChatId && callbackData.startsWith("signal:")) {
                   const ticker = callbackData
                     .slice("signal:".length)
