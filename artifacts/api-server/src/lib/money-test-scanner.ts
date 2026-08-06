@@ -1,4 +1,4 @@
-import { db, SECOND_TIER_TICKERS } from "@workspace/db";
+import { db, SMART_MONEY_TICKERS } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import {
   scanSmartMoney,
@@ -195,6 +195,8 @@ function moneyTestTickerName(ticker: string) {
        UGLD: "Южуралзолото",
        VSMO: "ВСМПО-АВИСМА",
        WUSH: "ВУШ Холдинг",
+       OZON: "Озон",
+       OZPH: "Озон Фармацевтика",
     }[ticker] ?? ticker
   );
 }
@@ -248,7 +250,7 @@ export async function scanMoneyTest(): Promise<MoneyTestScan> {
     }
     return true;
   });
-  const diagnostics = SECOND_TIER_TICKERS.map((ticker) => {
+  const diagnostics = SMART_MONEY_TICKERS.map((ticker) => {
     const diagnostic = base.diagnostics.find((item) => item.ticker === ticker);
     const extra = rejected.find((item) => item.ticker === ticker);
     return {

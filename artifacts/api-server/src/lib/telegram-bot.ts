@@ -15,7 +15,7 @@ import {
   patternStatistics,
   pool,
   signalsHistory,
-  SECOND_TIER_TICKERS,
+  SMART_MONEY_TICKERS,
   telegramCommoditySubscriptions,
   telegramMoneyTestSubscriptions,
   telegramPositionSettings,
@@ -4365,7 +4365,7 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
             OR ticker IN (${sql.join(
-              SECOND_TIER_TICKERS.map((ticker) => sql`${ticker}`),
+              SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,
             )})
           )
@@ -4435,7 +4435,7 @@ async function ensureSmartMoneyDataFresh() {
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
             OR ticker IN (${sql.join(
-              SECOND_TIER_TICKERS.map((ticker) => sql`${ticker}`),
+              SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,
             )})
           )

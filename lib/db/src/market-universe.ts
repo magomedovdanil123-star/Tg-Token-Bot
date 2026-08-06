@@ -40,4 +40,16 @@ export const SECOND_TIER_TICKERS = [
   "WUSH",
 ] as const;
 
+/**
+ * User-requested additions outside the official second-tier universe.
+ * OZON and OZPH are both listed as level 1 by MOEX.
+ */
+export const SMART_MONEY_EXTRA_TICKERS = ["OZON", "OZPH"] as const;
+
+export const SMART_MONEY_TICKERS = [
+  ...SECOND_TIER_TICKERS,
+  ...SMART_MONEY_EXTRA_TICKERS,
+] as const;
+
 export type SecondTierTicker = (typeof SECOND_TIER_TICKERS)[number];
+export type SmartMoneyTicker = (typeof SMART_MONEY_TICKERS)[number];

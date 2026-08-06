@@ -7,7 +7,7 @@ import {
   marketContext,
   moexTickers,
   pool,
-  SECOND_TIER_TICKERS,
+  SMART_MONEY_TICKERS,
 } from "@workspace/db";
 
 type JsonBlock = { columns?: string[]; data?: unknown[][] };
@@ -80,9 +80,11 @@ const SECOND_TIER_TICKER_NAMES: Record<string, string> = {
   UGLD: "Южуралзолото",
   VSMO: "ВСМПО-АВИСМА",
   WUSH: "ВУШ Холдинг",
+  OZON: "Озон",
+  OZPH: "Озон Фармацевтика",
 };
 
-const SECOND_TIER_TICKER_ROWS = SECOND_TIER_TICKERS.map((secid) => ({
+const SMART_MONEY_TICKER_ROWS = SMART_MONEY_TICKERS.map((secid) => ({
   secid,
   shortName: SECOND_TIER_TICKER_NAMES[secid] ?? secid,
 }));
@@ -904,14 +906,14 @@ async function main() {
       for (let index = 0; index < allTickers.length; index += 1) {
         await saveTicker(allTickers[index], index + 1);
       }
-      for (const ticker of SECOND_TIER_TICKER_ROWS) {
+      for (const ticker of SMART_MONEY_TICKER_ROWS) {
         await saveTicker(ticker, 0, false);
       }
     }
     const selectedTickers = requestedTicker
       ? [
           allTickers.find((ticker) => ticker.secid === requestedTicker) ??
-            SECOND_TIER_TICKER_ROWS.find((ticker) => ticker.secid === requestedTicker) ?? {
+            SMART_MONEY_TICKER_ROWS.find((ticker) => ticker.secid === requestedTicker) ?? {
               secid: requestedTicker,
               shortName: null,
               capitalization: undefined,
@@ -919,7 +921,7 @@ async function main() {
         ]
       : [
           ...allTickers,
-          ...SECOND_TIER_TICKER_ROWS.filter(
+          ...SMART_MONEY_TICKER_ROWS.filter(
             (extra) => !allTickers.some((ticker) => ticker.secid === extra.secid),
           ),
         ];

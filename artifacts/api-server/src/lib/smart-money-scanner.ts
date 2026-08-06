@@ -1,5 +1,10 @@
 import { desc, eq, inArray, or, sql } from "drizzle-orm";
-import { db, moexTickers, SECOND_TIER_TICKERS } from "@workspace/db";
+import {
+  db,
+  moexTickers,
+  SECOND_TIER_TICKERS,
+  SMART_MONEY_TICKERS,
+} from "@workspace/db";
 
 type Direction = "BUY" | "SELL";
 type Strength = "Weak" | "Medium" | "Strong" | "Extreme";
@@ -37,7 +42,7 @@ const ROUND_TRIP_COST_PERCENT = 0.2;
 const HARD_ENTRY_SCORE = 90;
 const HARD_MIN_NET_REWARD_RISK = 1.9;
 export const COMMODITY_TICKERS = ["XAUUSD", "XAGUSD", "BRENT"] as const;
-export const MONEY_TEST_TICKERS = SECOND_TIER_TICKERS;
+export const MONEY_TEST_TICKERS = SMART_MONEY_TICKERS;
 export type SmartMoneyUniverse = "imoex" | "commodities" | "money-test";
 export type SmartMoneySource =
   | "smartmoney"
@@ -505,11 +510,11 @@ export async function scanSmartMoney(
           ? or(
               eq(moexTickers.isActive, true),
               eq(moexTickers.secid, requestedTicker),
-              inArray(moexTickers.secid, [...SECOND_TIER_TICKERS]),
+              inArray(moexTickers.secid, [...SMART_MONEY_TICKERS]),
             )
           : or(
               eq(moexTickers.isActive, true),
-              inArray(moexTickers.secid, [...SECOND_TIER_TICKERS]),
+              inArray(moexTickers.secid, [...SMART_MONEY_TICKERS]),
             ),
     )
     .orderBy(desc(moexTickers.rank));
