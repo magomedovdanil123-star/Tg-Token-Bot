@@ -4317,7 +4317,7 @@ async function smartMoneyText(chatId?: number) {
       "",
       `Проверено акций: ${scan.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
       `Адаптивный минимальный рейтинг: ${formatNumber(scan.threshold, 0)}/100`,
-      "Фильтр: накопление + BOS + CHoCH + объём + HTF alignment + R:R ≥ 1:2.",
+      "Фильтр: базовый Smart Money-отбор с накоплением, BOS/CHoCH, объёмом, HTF alignment и контролем R:R.",
       `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates} · заблокировано риск-фильтром: ${records.blocked}`,
       scan.cooldownSkipped
         ? `Cooldown: ${scan.cooldownSkipped} тикеров временно пропущено после недавнего SMC-сигнала.`

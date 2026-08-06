@@ -692,7 +692,9 @@ export async function scanSmartMoney(
 
     const threshold = Math.max(
       adaptiveThreshold,
-      HARD_ENTRY_SCORE,
+      ...(source === "money-test"
+        ? [HARD_ENTRY_SCORE]
+        : []),
       trendOpposed && !trendAligned ? 90 : agreement.length >= 2 ? 80 : 85,
     );
     const stopPrice = direction === "BUY"
@@ -718,10 +720,13 @@ export async function scanSmartMoney(
       (currentMarketRegime !== "NEUTRAL" && currentMarketRegime !== direction) ||
       !breakoutMetrics.impulseConfirmed ||
       rangeToAtr > 3.5 ||
-      netRewardRisk < HARD_MIN_NET_REWARD_RISK ||
-      !retestConfirmed ||
-      !agreement.some((timeframe) => timeframe === "4H" || timeframe === "1D") ||
-      (!block && !fvg && liquidity.length === 0) ||
+      netRewardRisk < (source === "money-test" ? HARD_MIN_NET_REWARD_RISK : 1.65) ||
+      (source === "money-test" &&
+        (
+          !retestConfirmed ||
+          !agreement.some((timeframe) => timeframe === "4H" || timeframe === "1D") ||
+          (!block && !fvg && liquidity.length === 0)
+        )) ||
       score < threshold;
     if (rejected) {
       const diagnosticReasons = [
@@ -737,14 +742,17 @@ export async function scanSmartMoney(
           : null,
         !breakoutMetrics.impulseConfirmed ? "Импульс BOS слабый или закрытие недостаточно далеко за уровнем." : null,
         rangeToAtr > 3.5 ? `Сигнальная свеча слишком большая: ${rangeToAtr.toFixed(2)} ATR.` : null,
-        netRewardRisk < HARD_MIN_NET_REWARD_RISK
-          ? `Низкий net R:R после издержек: ${netRewardRisk.toFixed(2)}. Нужно минимум ${HARD_MIN_NET_REWARD_RISK.toFixed(2)}.`
+        netRewardRisk < (source === "money-test" ? HARD_MIN_NET_REWARD_RISK : 1.65)
+          ? `Низкий net R:R после издержек: ${netRewardRisk.toFixed(2)}. Нужно минимум ${(source === "money-test" ? HARD_MIN_NET_REWARD_RISK : 1.65).toFixed(2)}.`
           : null,
-        !retestConfirmed ? "Нет подтверждённого ретеста уровня." : null,
+        source === "money-test" && !retestConfirmed
+          ? "Нет подтверждённого ретеста уровня."
+          : null,
+        source === "money-test" &&
         !agreement.some((timeframe) => timeframe === "4H" || timeframe === "1D")
           ? "Нет подтверждения направления на 4H или 1D."
           : null,
-        !block && !fvg && liquidity.length === 0
+        source === "money-test" && !block && !fvg && liquidity.length === 0
           ? "Нет дополнительного подтверждения через OB, FVG или liquidity."
           : null,
         score < threshold ? `Рейтинг ${Math.round(score)} ниже порога ${threshold}.` : null,
@@ -769,7 +777,9 @@ export async function scanSmartMoney(
       }
       if (!breakoutMetrics.impulseConfirmed) filterStats.weakImpulse += 1;
       if (rangeToAtr > 3.5) filterStats.oversizedCandle += 1;
-       if (netRewardRisk < HARD_MIN_NET_REWARD_RISK) filterStats.lowNetRewardRisk += 1;
+      if (netRewardRisk < (source === "money-test" ? HARD_MIN_NET_REWARD_RISK : 1.65)) {
+        filterStats.lowNetRewardRisk += 1;
+      }
       if (score < threshold) filterStats.belowThreshold += 1;
       continue;
     }
