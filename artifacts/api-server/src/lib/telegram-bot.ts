@@ -61,6 +61,7 @@ const INTRADAY_HORIZON_MINUTES = 60;
 const PAPER_EVALUATION_INTERVAL_MS = 10 * 60 * 1000;
 const LEARNING_EVALUATION_INTERVAL_MS = 2 * 60 * 1000;
 const INTRADAY_SCAN_INTERVAL_MS = 10 * 60 * 1000;
+const SMART_MONEY_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const COMMODITY_SCAN_INTERVAL_MS = 3 * 60 * 1000;
 const MONEY_TEST_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const WAVE_SCAN_INTERVAL_MS = 30 * 60 * 1000;
@@ -4366,42 +4367,22 @@ async function smartMoneyText(chatId?: number) {
         smartMoneyCandidateText(candidate, index + 1, chatId),
       ),
     );
-    const rejectionPreview = Object.entries(scan.filterStats)
-      .filter(([, count]) => count > 0)
-      .sort(([, left], [, right]) => right - left)
-      .slice(0, 3)
-      .map(([name, count]) => `${name}: ${count}`)
-      .join(" · ");
     return [
       "💰 SMART MONEY · SMC IMOEX",
       "",
       `Проверено акций: ${scan.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
-      `Адаптивный минимальный рейтинг: ${formatNumber(scan.threshold, 0)}/100`,
-      "Фильтр: базовый Smart Money-отбор с накоплением, BOS/CHoCH, объёмом, HTF alignment и контролем R:R.",
-      `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates} · заблокировано риск-фильтром: ${records.blocked}`,
-      scan.cooldownSkipped
-        ? `Cooldown: ${scan.cooldownSkipped} тикеров временно пропущено после недавнего SMC-сигнала.`
-        : "Cooldown: повторных SMC-сигналов по тикерам нет.",
-      rejectionPreview
-        ? `Основные причины отсева: ${rejectionPreview}`
-        : "Основных причин отсева нет.",
+      "Автоматический сканер: все акции · обновление примерно каждые 2 минуты.",
       "",
       ...(blocks.length
         ? blocks.flatMap((block) => [block, ""])
         : [
-            "Свежих Smart Money-сетапов нет.",
+            "Сейчас подтверждённых точек входа LONG или SHORT нет.",
             "",
-            "Сигнал не создаётся, если отсутствует подтверждённое накопление, BOS/CHoCH, объём, согласование старших таймфреймов или R:R ниже 1:2.",
+            "Проверка продолжается автоматически. Сообщение придёт, когда появится подтверждённый Smart Money-сетап.",
           ]),
-      scan.unavailable.length
-        ? `Недоступны для оценки: ${scan.unavailable.slice(0, 5).join("; ")}${scan.unavailable.length > 5 ? " и другие" : ""}`
-        : "Все тикеры имеют достаточную историю для проверки.",
       scan.marketContextWarning
-        ? `Важно: ${scan.marketContextWarning}. Свежие акции проверены без направления IMOEX.`
+        ? "Направление IMOEX временно не подтверждено; свежие акции проверены без него."
         : null,
-      "",
-      "Режим: PAPER TRADING — реальные деньги не используются.",
-      "Smart Money — исследовательская стратегия, не финансовая рекомендация.",
     ].join("\n");
   } catch (error) {
     logger.error({ err: error }, "Smart Money scan failed");
@@ -4441,7 +4422,7 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
     const isFresh =
       latestTimestamp !== null &&
       Number.isFinite(latestTimestamp.getTime()) &&
-      Date.now() - latestTimestamp.getTime() <= SMART_MONEY_1H_MAX_AGE_MS;
+      Date.now() - (latestTimestamp.getTime() + 60 * 60_000) <= SMART_MONEY_1H_MAX_AGE_MS;
     if (isFresh) return;
 
     await new Promise<void>((resolve, reject) => {
@@ -4530,7 +4511,7 @@ async function ensureSmartMoneyDataFresh() {
     oneHourLatest !== null &&
     oneHourLatest !== undefined &&
     Number.isFinite(oneHourLatest.getTime()) &&
-    Date.now() - oneHourLatest.getTime() <= SMART_MONEY_1H_MAX_AGE_MS;
+    Date.now() - (oneHourLatest.getTime() + 60 * 60_000) <= SMART_MONEY_1H_MAX_AGE_MS;
   if (oneMinuteFresh && oneHourFresh) return;
   await refreshLatestIntradayData();
 }
@@ -5944,7 +5925,7 @@ export function startTelegramBot() {
   }, WAVE_SCAN_INTERVAL_MS);
   const smartMoneyScanTimer = setInterval(() => {
     void runSmartMoneyScanCycle();
-  }, INTRADAY_SCAN_INTERVAL_MS);
+  }, SMART_MONEY_SCAN_INTERVAL_MS);
   const commodityScanTimer = setInterval(() => {
     void runCommodityScanCycle();
   }, COMMODITY_SCAN_INTERVAL_MS);

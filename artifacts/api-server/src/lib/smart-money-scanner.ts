@@ -192,9 +192,14 @@ function aggregate(rows: Candle[], minutes: number) {
 function aggregateClosed(rows: Candle[], minutes: number) {
   if (!rows.length) return [];
   const latestBucket = bucketTimestamp(rows.at(-1)!.timestamp, minutes).getTime();
+  const latestBucketClosed =
+    latestBucket + minutes * 60_000 <= Date.now();
   return aggregate(
     rows.filter(
-      (row) => bucketTimestamp(row.timestamp, minutes).getTime() < latestBucket,
+      (row) =>
+        bucketTimestamp(row.timestamp, minutes).getTime() < latestBucket ||
+        (latestBucketClosed &&
+          bucketTimestamp(row.timestamp, minutes).getTime() === latestBucket),
     ),
     minutes,
   );
@@ -559,7 +564,11 @@ export async function scanSmartMoney(
     const maxAgeMs =
       timeframe === "1m" ? SMART_MONEY_1M_MAX_AGE_MS : SMART_MONEY_1H_MAX_AGE_MS;
     if (!latest) return `${ticker}: отсутствуют свечи ${timeframe}.`;
-    const ageMs = generatedAt.getTime() - latest.getTime();
+    // MOEX timestamps identify the start of a candle. Compare freshness with
+    // the candle's close, otherwise every closed 1h candle looks one hour older
+    // than it really is.
+    const candleDurationMs = timeframe === "1m" ? 60_000 : 60 * 60_000;
+    const ageMs = generatedAt.getTime() - (latest.getTime() + candleDurationMs);
     if (!Number.isFinite(ageMs) || ageMs < -5 * 60 * 1000) {
       return `${ticker}: свеча ${timeframe} имеет время из будущего: ${latest.toISOString()}.`;
     }
@@ -674,7 +683,10 @@ export async function scanSmartMoney(
       });
       continue;
     }
+    // Structure is confirmed only on closed 15m bars. The entry uses the
+    // freshest available 1m bar so alerts remain actionable between 15m closes.
     const current = primary.at(-1)!;
+    const execution = series.oneMinute.at(-1)!;
     const levels = structure(primary);
     const range = accumulation(primary);
     if (!range) {
@@ -768,18 +780,19 @@ export async function scanSmartMoney(
         : []),
       trendOpposed && !trendAligned ? 90 : agreement.length >= 2 ? 80 : 85,
     );
+    const entryPrice = execution.close;
     const stopPrice = direction === "BUY"
-      ? Math.min(levels.swingLow ?? current.close - currentAtr, current.close - currentAtr * 0.8)
-      : Math.max(levels.swingHigh ?? current.close + currentAtr, current.close + currentAtr * 0.8);
-    const risk = Math.abs(current.close - stopPrice);
-    const takeProfit1 = direction === "BUY" ? current.close + risk : current.close - risk;
-    const takeProfit2 = direction === "BUY" ? current.close + risk * 2 : current.close - risk * 2;
-    const takeProfit3 = direction === "BUY" ? current.close + risk * 3 : current.close - risk * 3;
-    const rewardRisk = risk > 0 ? Math.abs(takeProfit2 - current.close) / risk : 0;
-    const roundTripCost = current.close * (ROUND_TRIP_COST_PERCENT / 100);
+      ? Math.min(levels.swingLow ?? entryPrice - currentAtr, entryPrice - currentAtr * 0.8)
+      : Math.max(levels.swingHigh ?? entryPrice + currentAtr, entryPrice + currentAtr * 0.8);
+    const risk = Math.abs(entryPrice - stopPrice);
+    const takeProfit1 = direction === "BUY" ? entryPrice + risk : entryPrice - risk;
+    const takeProfit2 = direction === "BUY" ? entryPrice + risk * 2 : entryPrice - risk * 2;
+    const takeProfit3 = direction === "BUY" ? entryPrice + risk * 3 : entryPrice - risk * 3;
+    const rewardRisk = risk > 0 ? Math.abs(takeProfit2 - entryPrice) / risk : 0;
+    const roundTripCost = entryPrice * (ROUND_TRIP_COST_PERCENT / 100);
     const netRewardRisk =
       risk + roundTripCost > 0
-        ? (Math.abs(takeProfit2 - current.close) - roundTripCost) /
+        ? (Math.abs(takeProfit2 - entryPrice) - roundTripCost) /
           (risk + roundTripCost)
         : 0;
     const rejected =
@@ -871,7 +884,7 @@ export async function scanSmartMoney(
       `Режим рынка: ${currentMarketRegime === "BUY" ? "сильный рынок" : currentMarketRegime === "SELL" ? "слабый рынок" : "нейтральный"}`,
     ];
     const chartText = chart(primary, {
-      entry: current.close,
+      entry: entryPrice,
       stop: stopPrice,
       target: takeProfit3,
       rangeLow: range.rangeLow,
@@ -884,7 +897,7 @@ export async function scanSmartMoney(
       threshold,
       probability: Math.min(97, Math.max(80, Math.round(score * 0.94))),
       timeframe: "15m + 1H/4H/1D",
-      entryPrice: current.close,
+      entryPrice,
       stopPrice,
       takeProfit1,
       takeProfit2,
