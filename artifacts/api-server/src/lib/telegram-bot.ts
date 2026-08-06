@@ -4423,6 +4423,7 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
         WHERE timeframe = '1h'
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+            OR ticker = 'IMOEX'
             OR ticker IN (${sql.join(
               SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,
@@ -4493,6 +4494,7 @@ async function ensureSmartMoneyDataFresh() {
         WHERE timeframe IN ('1m', '1h')
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+            OR ticker = 'IMOEX'
             OR ticker IN (${sql.join(
               SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,

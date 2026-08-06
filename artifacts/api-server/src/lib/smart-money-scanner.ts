@@ -41,6 +41,8 @@ type MarketRegime = "BUY" | "SELL" | "NEUTRAL";
 const ROUND_TRIP_COST_PERCENT = 0.2;
 const HARD_ENTRY_SCORE = 90;
 const HARD_MIN_NET_REWARD_RISK = 1.9;
+const SMART_MONEY_1M_MAX_AGE_MS = 15 * 60 * 1000;
+const SMART_MONEY_1H_MAX_AGE_MS = 90 * 60 * 1000;
 export const COMMODITY_TICKERS = ["XAUUSD", "XAGUSD", "BRENT"] as const;
 export const MONEY_TEST_TICKERS = SMART_MONEY_TICKERS;
 export type SmartMoneyUniverse = "imoex" | "commodities" | "money-test";
@@ -541,6 +543,31 @@ export async function scanSmartMoney(
     ORDER BY ticker, timeframe, timestamp
   `);
   const rows = rowsFromResult(result);
+  const latestByTickerTimeframe = new Map<string, Date>();
+  for (const row of rows) {
+    const key = `${row.ticker}:${row.timeframe}`;
+    const previous = latestByTickerTimeframe.get(key);
+    if (!previous || row.timestamp > previous) {
+      latestByTickerTimeframe.set(key, row.timestamp);
+    }
+  }
+  const freshnessReason = (ticker: string, timeframe: "1m" | "1h") => {
+    const latest = latestByTickerTimeframe.get(`${ticker}:${timeframe}`);
+    const maxAgeMs =
+      timeframe === "1m" ? SMART_MONEY_1M_MAX_AGE_MS : SMART_MONEY_1H_MAX_AGE_MS;
+    if (!latest) return `${ticker}: отсутствуют свечи ${timeframe}.`;
+    const ageMs = generatedAt.getTime() - latest.getTime();
+    if (!Number.isFinite(ageMs) || ageMs > maxAgeMs) {
+      return `${ticker}: свеча ${timeframe} устарела на ${Math.max(0, ageMs / 60_000).toFixed(0)} мин. Последняя: ${latest.toISOString()}.`;
+    }
+    return null;
+  };
+  const marketFreshnessReasons =
+    universe === "commodities"
+      ? []
+      : (["1m", "1h"] as const)
+          .map((timeframe) => freshnessReason("IMOEX", timeframe))
+          .filter((reason): reason is string => Boolean(reason));
   const marketOneHour = rows
     .filter((row) => row.ticker === "IMOEX" && row.timeframe === "1h")
     .sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime());
@@ -582,6 +609,30 @@ export async function scanSmartMoney(
     belowThreshold: 0,
   };
   for (const ticker of tickers) {
+    const tickerFreshnessReasons =
+      universe === "commodities"
+        ? []
+        : (["1m", "1h"] as const)
+            .map((timeframe) => freshnessReason(ticker, timeframe))
+            .filter((reason): reason is string => Boolean(reason));
+    if (marketFreshnessReasons.length || tickerFreshnessReasons.length) {
+      const reasons = [
+        ...marketFreshnessReasons.map(
+          (reason) => `Рыночный контекст не подтверждён: ${reason}`,
+        ),
+        ...tickerFreshnessReasons,
+      ];
+      unavailable.push(`${ticker}: ${reasons.join(" ")}`);
+      diagnostics.push({
+        ticker,
+        passed: false,
+        direction: null,
+        score: null,
+        threshold: adaptiveThreshold,
+        reasons,
+      });
+      continue;
+    }
     if (!options.skipCooldown && cooldownTickers.has(ticker)) {
       cooldownSkipped += 1;
       filterStats.cooldown += 1;
