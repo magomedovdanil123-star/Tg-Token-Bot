@@ -2959,7 +2959,7 @@ async function smartMoneyCandidateText(
     `FVG: ${candidate.fairValueGap ?? "не найден"}`,
     `Объём: ${candidate.volumeConfirmed ? "подтверждён" : "не подтверждён"} · ретест: ${candidate.retestConfirmed ? "подтверждён" : "не подтверждён"}`,
     `Согласование старших ТФ: ${candidate.higherTimeframeAgreement.join(", ")}`,
-    `Режим IMOEX: ${candidate.marketRegime === "BUY" ? "сильный рынок" : candidate.marketRegime === "SELL" ? "слабый рынок" : "нейтральный"}`,
+    `Режим IMOEX: ${candidate.marketRegime === "BUY" ? "сильный рынок" : candidate.marketRegime === "SELL" ? "слабый рынок" : "нейтральный"}${candidate.marketContextConfirmed ? "" : " · направление не подтверждено"}`,
     `Импульс BOS: ${candidate.impulseConfirmed ? "подтверждён" : "слабый"} · ${formatNumber(candidate.bosQuality, 2)} ATR`,
     `Размер сигнальной свечи: ${formatNumber(candidate.rangeToAtr, 2)} ATR`,
     "",
@@ -4396,6 +4396,9 @@ async function smartMoneyText(chatId?: number) {
       scan.unavailable.length
         ? `Недоступны для оценки: ${scan.unavailable.slice(0, 5).join("; ")}${scan.unavailable.length > 5 ? " и другие" : ""}`
         : "Все тикеры имеют достаточную историю для проверки.",
+      scan.marketContextWarning
+        ? `Важно: ${scan.marketContextWarning}. Свежие акции проверены без направления IMOEX.`
+        : null,
       "",
       "Режим: PAPER TRADING — реальные деньги не используются.",
       "Smart Money — исследовательская стратегия, не финансовая рекомендация.",
@@ -4421,9 +4424,9 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
         SELECT ticker, MAX(timestamp) AS latest
         FROM candles
         WHERE timeframe = '1h'
+          AND ticker <> 'IMOEX'
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
-            OR ticker = 'IMOEX'
             OR ticker IN (${sql.join(
               SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,
@@ -4492,9 +4495,9 @@ async function ensureSmartMoneyDataFresh() {
       SELECT ticker, timeframe, MAX(timestamp) AS latest
       FROM candles
         WHERE timeframe IN ('1m', '1h')
+          AND ticker <> 'IMOEX'
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
-            OR ticker = 'IMOEX'
             OR ticker IN (${sql.join(
               SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,

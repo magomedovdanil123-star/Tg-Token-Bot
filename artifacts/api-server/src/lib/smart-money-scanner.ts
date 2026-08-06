@@ -90,6 +90,7 @@ export type SmartMoneyCandidate = {
   retestConfirmed: boolean;
   higherTimeframeAgreement: string[];
   marketRegime: MarketRegime;
+  marketContextConfirmed: boolean;
   bosQuality: number;
   impulseConfirmed: boolean;
   rangeToAtr: number;
@@ -107,6 +108,8 @@ export type SmartMoneyScan = {
   cooldownSkipped: number;
   filterStats: SmartMoneyFilterStats;
   diagnostics: SmartMoneyTickerDiagnostic[];
+  marketContextConfirmed: boolean;
+  marketContextWarning: string | null;
 };
 
 export type SmartMoneyTickerDiagnostic = {
@@ -571,6 +574,10 @@ export async function scanSmartMoney(
       : (["1m", "1h"] as const)
           .map((timeframe) => freshnessReason("IMOEX", timeframe))
           .filter((reason): reason is string => Boolean(reason));
+  const marketContextConfirmed = marketFreshnessReasons.length === 0;
+  const marketContextWarning = marketContextConfirmed
+    ? null
+    : `IMOEX не подтверждён: ${marketFreshnessReasons.join(" ")}`;
   const marketOneHour = rows
     .filter((row) => row.ticker === "IMOEX" && row.timeframe === "1h")
     .sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime());
@@ -618,11 +625,8 @@ export async function scanSmartMoney(
         : (["1m", "1h"] as const)
             .map((timeframe) => freshnessReason(ticker, timeframe))
             .filter((reason): reason is string => Boolean(reason));
-    if (marketFreshnessReasons.length || tickerFreshnessReasons.length) {
+    if (tickerFreshnessReasons.length) {
       const reasons = [
-        ...marketFreshnessReasons.map(
-          (reason) => `Рыночный контекст не подтверждён: ${reason}`,
-        ),
         ...tickerFreshnessReasons,
       ];
       unavailable.push(`${ticker}: ${reasons.join(" ")}`);
@@ -701,7 +705,9 @@ export async function scanSmartMoney(
     const direction = levels.direction;
     const currentMarketRegime = universe === "commodities"
       ? getMarketRegime(oneHour)
-      : marketRegime;
+      : marketContextConfirmed
+        ? marketRegime
+        : "NEUTRAL";
     const liquidity = liquiditySignals(primary, current, levels);
     const block = orderBlock(primary, direction, levels);
     const fvg = fairValueGap(primary, direction);
@@ -894,6 +900,7 @@ export async function scanSmartMoney(
       retestConfirmed,
       higherTimeframeAgreement: agreement,
       marketRegime: currentMarketRegime,
+      marketContextConfirmed,
       bosQuality: breakoutMetrics.quality,
       impulseConfirmed: breakoutMetrics.impulseConfirmed,
       rangeToAtr: round(rangeToAtr),
@@ -920,5 +927,7 @@ export async function scanSmartMoney(
     cooldownSkipped,
     filterStats,
     diagnostics,
+    marketContextConfirmed,
+    marketContextWarning,
   };
 }

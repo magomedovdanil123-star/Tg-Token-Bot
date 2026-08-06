@@ -1046,7 +1046,13 @@ async function main() {
           });
       }
     } catch (error) {
-      errors.push(`IMOEX: ${error instanceof Error ? error.message : String(error)}`);
+      // IMOEX intraday candles are not consistently available from MOEX ISS.
+      // Stock candles remain usable without this optional market context;
+      // Smart Money marks the context as unconfirmed instead of failing the
+      // entire refresh and suppressing all stock signals.
+      console.warn(
+        `Предупреждение IMOEX: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     console.log(
