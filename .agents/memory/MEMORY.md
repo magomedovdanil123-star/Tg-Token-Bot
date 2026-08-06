@@ -21,3 +21,4 @@
 - [MOEX timestamp timezone](moex-timestamp-timezone.md) — ISS timestamps without an offset are Moscow time; parse them explicitly as Europe/Moscow on UTC hosts.
 - [MOEX candle freshness](moex-candle-freshness.md) — candle timestamps mark interval starts; freshness uses close time, while SMC structure stays on closed bars.
 - [Local Telegram isolation](local-telegram-isolation.md) — Replit development must never poll the production Telegram bot token.
+- [Timeweb build cache](timeweb-build-cache.md) — rebuild db declarations and clear TypeScript caches when synced source exports appear missing on production.
