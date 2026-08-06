@@ -20,3 +20,7 @@ Company analysis is a ticker-scoped view of the existing Smart Money scanner, no
 **Position sizing:** Averaging levels are only target entry zones; clamp them to the safe side of the original stop so a planned averaging fill never occurs after the stop has already invalidated the setup.
 
 **Why:** A long setup with a 3% averaging level can have a tighter structural stop, making the old fixed percentage level mathematically below the stop and logically unreachable before exit.
+
+**Ordinary Smart Money delivery:** The ordinary `smartmoney` source bypasses the paper-position risk cap when recording a valid candidate, while duplicate protection and the scanner's cooldown remain active.
+
+**Why:** Paper capacity is a research-control limit, not a reason to hide a valid SMC alert from a subscribed Telegram chat.
