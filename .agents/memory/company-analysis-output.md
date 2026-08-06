@@ -12,3 +12,11 @@ Company analysis is a ticker-scoped view of the existing Smart Money scanner, no
 **Telegram constraint:** Treat `answerCallbackQuery` as a best-effort UI acknowledgement. An expired callback toast must not abort the company-analysis work or trigger the generic retry message.
 
 **Why:** Company analysis refreshes MOEX data before scanning, so Telegram's short callback acknowledgement window can expire while the actual analysis is still valid.
+
+**Telegram delivery:** Ordinary Smart Money subscribers must be persisted in PostgreSQL and loaded at startup; an in-memory chat set alone loses automatic signal recipients after a restart.
+
+**Why:** The bot is deployed as a long-running Timeweb service, and a restart otherwise leaves manual Smart Money responses working while background notifications silently have no recipients.
+
+**Position sizing:** Averaging levels are only target entry zones; clamp them to the safe side of the original stop so a planned averaging fill never occurs after the stop has already invalidated the setup.
+
+**Why:** A long setup with a 3% averaging level can have a tighter structural stop, making the old fixed percentage level mathematically below the stop and logically unreachable before exit.
