@@ -4295,6 +4295,10 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
       combinationIds: [],
       source: "smartmoney",
       timeframe: "15m",
+      // A valid ordinary Smart Money setup must reach subscribers even when
+      // the paper-position control group is full. Recording it also preserves
+      // the normal duplicate/cooldown protection for the next scan cycle.
+      bypassRiskLimits: true,
       metadata: {
         smartMoney: true,
         timeframe: "15m",
