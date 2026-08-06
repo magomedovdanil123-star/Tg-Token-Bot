@@ -16,3 +16,4 @@
 - [Telegram alert subscriptions](telegram-alert-subscriptions.md) — background scanners need an explicit subscribed chat set; scanning alone does not deliver alerts.
 - [Timeweb deployment](timeweb-deployment.md) — Timeweb host has port 8080 occupied; Invest AI uses 8099 and needs a GitHub deploy key plus Telegram token.
 - [Hidden signal learning](learning-evaluation.md) — background paper-signal evaluation uses independent fixed ±1.5% controls and never changes live rules or Telegram UI.
+- [Development schema changes](dev-schema-migrations.md) — Drizzle schema conflicts can block non-interactive pushes; use the standard post-merge/publish database flow.

@@ -17,6 +17,7 @@ import {
   signalsHistory,
   telegramCommoditySubscriptions,
   telegramMoneyTestSubscriptions,
+  telegramPositionSettings,
 } from "@workspace/db";
 import { logger } from "./logger";
 import { scanMarketAnalogues } from "./market-analog-scanner";
@@ -50,6 +51,7 @@ const SMART_MONEY_BUTTON = "💰 Smart Money";
 const COMMODITIES_BUTTON = "🪙 Сырьё и металлы";
 const MONEY_TEST_BUTTON = "💵 Деньги тест";
 const COMPANY_ANALYSIS_BUTTON = "🔎 Аналитика компании";
+const AVERAGING_BUTTON = "📐 Усреднение / банк";
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
 const INTRADAY_HORIZON_MINUTES = 60;
@@ -91,6 +93,7 @@ const TELEGRAM_MENU = {
     [COMMODITIES_BUTTON],
     [MONEY_TEST_BUTTON],
     [COMPANY_ANALYSIS_BUTTON],
+    [AVERAGING_BUTTON],
     ["❓ Помощь"],
   ],
   resize_keyboard: true,
@@ -116,6 +119,7 @@ const commodityChatIds = new Set<number>();
 let moneyTestScanRunning = false;
 let moneyTestNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
 const moneyTestChatIds = new Set<number>();
+const pendingBankChats = new Set<number>();
 
 async function loadCommoditySubscriptions() {
   const subscriptions = await db
@@ -403,6 +407,196 @@ function formatNumber(value: number | null | undefined, digits = 2) {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
+}
+
+function formatRub(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return `${value.toLocaleString("ru-RU", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })} ₽`;
+}
+
+type PositionContext = {
+  bankRub: number;
+  usdRub: number | null;
+};
+
+type PositionPlan = {
+  currency: "RUB" | "USD";
+  bank: number;
+  allocation: [number, number, number];
+  allocationLabel: string;
+  levels: { label: string; price: number; budget: number; units: number }[];
+  stages: {
+    label: string;
+    averagePrice: number;
+    units: number;
+    stop: number;
+    targets: number[];
+    riskAtStop: number | null;
+  }[];
+  riskAtStop: number | null;
+};
+
+async function getPositionContext(chatId: number | undefined): Promise<PositionContext | null> {
+  if (chatId === undefined || !Number.isSafeInteger(chatId)) return null;
+  const rows = await db
+    .select({ bankRub: telegramPositionSettings.bankRub })
+    .from(telegramPositionSettings)
+    .where(eq(telegramPositionSettings.chatId, chatId))
+    .limit(1);
+  if (!rows[0] || !Number.isFinite(rows[0].bankRub) || rows[0].bankRub <= 0) return null;
+  const usdRows = await db.execute(sql`
+    SELECT mo.close
+    FROM market_observations mo
+    JOIN market_instruments mi ON mi.id = mo.instrument_id
+    WHERE mi.code = 'USD_RUB'
+      AND mo.close IS NOT NULL
+    ORDER BY mo.timestamp DESC
+    LIMIT 1
+  `);
+  const usdRub = Number((usdRows.rows[0] as Record<string, unknown> | undefined)?.close);
+  return {
+    bankRub: rows[0].bankRub,
+    usdRub: Number.isFinite(usdRub) && usdRub > 0 ? usdRub : null,
+  };
+}
+
+function parseBankRub(text: string) {
+  const normalized = text
+    .toLocaleLowerCase("ru-RU")
+    .replace(/\s+/g, "")
+    .replace(/₽|руб\.?|рублей|р\./g, "")
+    .replace(",", ".");
+  const match = normalized.match(/^(\d+(?:\.\d+)?)(к|k|м|m)?$/);
+  if (!match) return null;
+  const base = Number(match[1]);
+  const multiplier = match[2] && ["м", "m"].includes(match[2]) ? 1_000_000 : match[2] ? 1_000 : 1;
+  const bank = base * multiplier;
+  return Number.isFinite(bank) && bank >= 1_000 && bank <= 1_000_000_000 ? bank : null;
+}
+
+async function saveBankRub(chatId: number, bankRub: number) {
+  await db
+    .insert(telegramPositionSettings)
+    .values({ chatId, bankRub })
+    .onConflictDoUpdate({
+      target: telegramPositionSettings.chatId,
+      set: { bankRub, updatedAt: new Date() },
+    });
+}
+
+function positionAllocation(candidate: {
+  score?: number;
+  volumeConfirmed?: boolean;
+  retestConfirmed?: boolean;
+  marketRegime?: string;
+  direction?: string;
+}) {
+  const alignedRegime =
+    candidate.direction &&
+    candidate.marketRegime &&
+    candidate.marketRegime === candidate.direction;
+  const strong =
+    (candidate.score ?? 0) >= 85 &&
+    candidate.volumeConfirmed === true &&
+    candidate.retestConfirmed === true &&
+    alignedRegime;
+  const cautious =
+    (candidate.score ?? 0) < 75 ||
+    candidate.retestConfirmed === false ||
+    candidate.marketRegime === "NEUTRAL";
+  if (strong) return { values: [0.6, 0.25, 0.15] as [number, number, number], label: "60% / 25% / 15% · сильный сетап" };
+  if (cautious) return { values: [0.4, 0.35, 0.25] as [number, number, number], label: "40% / 35% / 25% · повышенная волатильность/риск" };
+  return { values: [0.5, 0.3, 0.2] as [number, number, number], label: "50% / 30% / 20% · обычный сетап" };
+}
+
+function buildPositionPlan(input: {
+  context: PositionContext;
+  ticker: string;
+  direction: "BUY" | "SELL";
+  entry: number;
+  stop: number | null;
+  targets: number[];
+  score?: number;
+  volumeConfirmed?: boolean;
+  retestConfirmed?: boolean;
+  marketRegime?: string;
+}) {
+  const isCommodity = ["XAUUSD", "XAGUSD", "BRENT"].includes(input.ticker);
+  const currency: "RUB" | "USD" = isCommodity ? "USD" : "RUB";
+  const usdRub = input.context.usdRub;
+  if (currency === "USD" && usdRub === null) return null;
+  const bank = currency === "USD" ? input.context.bankRub / (usdRub ?? 1) : input.context.bankRub;
+  const allocation = positionAllocation(input);
+  const levelFactors = input.direction === "BUY" ? [1, 0.985, 0.97] : [1, 1.015, 1.03];
+  const entries = levelFactors.map((factor) => input.entry * factor);
+  const levels = entries.map((price, index) => ({
+    label: index === 0 ? "Основной вход" : `${index}-е усреднение`,
+    price,
+    budget: bank * allocation.values[index],
+    units: Math.floor((bank * allocation.values[index]) / price),
+  }));
+  const stages = levels.map((level, index) => {
+    const filled = levels.slice(0, index + 1);
+    const units = filled.reduce((sum, item) => sum + item.units, 0);
+    const invested = filled.reduce((sum, item) => sum + item.units * item.price, 0);
+    const averagePrice = units > 0 ? invested / units : level.price;
+    const originalDistance = input.entry;
+    const adjustedTargets = input.targets.map((target) => {
+      const percentFromEntry = (target - originalDistance) / originalDistance;
+      return averagePrice * (1 + percentFromEntry);
+    });
+    const stop = input.stop ?? (input.direction === "BUY" ? input.entry * 0.99 : input.entry * 1.01);
+    const riskAtStop =
+      input.direction === "BUY"
+        ? (averagePrice - stop) * units
+        : (stop - averagePrice) * units;
+    return {
+      label: index === 0 ? "После основного входа" : `После ${index}-го усреднения`,
+      averagePrice,
+      units,
+      stop,
+      targets: adjustedTargets,
+      riskAtStop: Number.isFinite(riskAtStop) ? riskAtStop : null,
+    };
+  });
+  return {
+    currency,
+    bank,
+    allocation: allocation.values,
+    allocationLabel: allocation.label,
+    levels,
+    stages,
+    riskAtStop: stages.at(-1)?.riskAtStop ?? null,
+  } satisfies PositionPlan;
+}
+
+function positionPlanText(plan: PositionPlan, bankRub: number, usdRub: number | null) {
+  const money = (value: number) =>
+    `${formatNumber(value, 2)} ${plan.currency}${plan.currency === "USD" ? ` (≈ ${formatRub(value * (usdRub ?? 0))})` : ""}`;
+  return [
+    "",
+    "📐 РАСЧЁТ УСРЕДНЕНИЯ",
+    `Банк на этот сигнал: ${formatRub(bankRub)}${plan.currency === "USD" ? ` · курс USD/RUB: ${formatNumber(usdRub, 2)}` : ""}`,
+    `Распределение: ${plan.allocationLabel}`,
+    "Уровни: 1-е усреднение −/+1,5%, 2-е −/+3% от исходного входа",
+    "",
+    ...plan.levels.map(
+      (level, index) =>
+        `${index + 1}. ${level.label}: ${formatNumber(level.price)} · ${money(level.budget)} · ${level.units.toLocaleString("ru-RU")} ед.`,
+    ),
+    "",
+    "Средняя цена, стоп и тейки после каждого этапа:",
+    ...plan.stages.flatMap((stage) => [
+      `${stage.label}:`,
+      `  Средняя: ${formatNumber(stage.averagePrice)} · всего: ${stage.units.toLocaleString("ru-RU")} ед.`,
+      `  Стоп: ${formatNumber(stage.stop)} · риск до стопа: ${stage.riskAtStop === null ? "—" : money(Math.max(0, stage.riskAtStop))}`,
+      `  TP1: ${formatNumber(stage.targets[0])} · TP2: ${formatNumber(stage.targets[1])} · TP3: ${formatNumber(stage.targets[2])}`,
+    ]),
+    "Количество округлено вниз. Это расчёт paper-позиции, не заявка брокеру.",
+  ];
 }
 
 function formatDate(value: Date | string | null | undefined) {
@@ -2514,6 +2708,7 @@ function helpText() {
     `«${COMPANY_ANALYSIS_BUTTON}» — выполнить Smart Money-анализ выбранной компании.`,
     "",
     "Также доступны команды:",
+    "/bank — установить или изменить банк для расчёта усреднения.",
     "/smartmoney — подтверждённые Smart Money SMC-сетапы.",
     "/commodities — Smart Money-анализ золота, серебра и Brent.",
     "/moneytest — экспериментальный intraday-анализ с дополнительными фильтрами.",
@@ -2574,6 +2769,28 @@ function isMoneyTestRequest(text: string) {
   );
 }
 
+function isAveragingRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  const firstToken = normalizedText.split(/\s+/, 1)[0];
+  return (
+    normalizedText === AVERAGING_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "усреднение" ||
+    normalizedText === "банк" ||
+    firstToken === "/bank" ||
+    firstToken === "/setbank"
+  );
+}
+
+function threeTargetsFromSingle(entry: number, target: number, direction: "BUY" | "SELL") {
+  const distance = Math.abs(target - entry);
+  const sign = direction === "BUY" ? 1 : -1;
+  return [
+    entry + sign * distance * 0.5,
+    target,
+    entry + sign * distance * 1.5,
+  ];
+}
+
 function isIntradayRequest(text: string) {
   const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
   return (
@@ -2603,7 +2820,11 @@ function isWaveStatsRequest(text: string) {
   );
 }
 
-function intradayCandidateText(candidate: IntradayCandidate, index: number) {
+async function intradayCandidateText(
+  candidate: IntradayCandidate,
+  index: number,
+  chatId?: number,
+) {
   const isLong = candidate.direction === "BUY";
   const marketEntry = isLong ? candidate.quote.offer : candidate.quote.bid;
   if (marketEntry === null) return null;
@@ -2614,7 +2835,7 @@ function intradayCandidateText(candidate: IntradayCandidate, index: number) {
     ? marketEntry * (1 - candidate.stopPercent / 100)
     : marketEntry * (1 + candidate.stopPercent / 100);
   const netTargetPercent = candidate.targetPercent - PAPER_TRANSACTION_COST_PERCENT;
-  return [
+  const lines = [
     `${index}. ${candidate.ticker} — ${isLong ? "LONG" : "SHORT"}`,
     `Сила внутридневного сетапа: ${candidate.score}/100`,
     `Текущая цена: ${formatNumber(candidate.quote.last)}`,
@@ -2631,15 +2852,34 @@ function intradayCandidateText(candidate: IntradayCandidate, index: number) {
     ...candidate.reasons.map((reason) => `• ${reason}`),
     "Стакан: не используется — публичный MOEX endpoint не отдал orderbook",
     "Режим: PAPER TRADING — реальные сделки не совершаются",
-  ].join("\n");
+  ];
+  const context = await getPositionContext(chatId);
+  if (context) {
+    const plan = buildPositionPlan({
+      context,
+      ticker: candidate.ticker,
+      direction: isLong ? "BUY" : "SELL",
+      entry: marketEntry,
+      stop,
+      targets: threeTargetsFromSingle(marketEntry, target, isLong ? "BUY" : "SELL"),
+      score: candidate.score,
+      marketRegime: "NEUTRAL",
+    });
+    if (plan) lines.push(...positionPlanText(plan, context.bankRub, context.usdRub));
+  }
+  return lines.join("\n");
 }
 
-function smartMoneyCandidateText(candidate: SmartMoneyCandidate, index: number) {
+async function smartMoneyCandidateText(
+  candidate: SmartMoneyCandidate,
+  index: number,
+  chatId?: number,
+) {
   const isLong = candidate.direction === "BUY";
   const direction = isLong ? "LONG" : "SHORT";
   const sign = isLong ? "+" : "-";
   const stopSign = isLong ? "-" : "+";
-  return [
+  const lines = [
     `${index}. ${isLong ? "📈" : "📉"} ${direction} · ${candidate.ticker}`,
     `Рейтинг: ${candidate.score}/100 · адаптивный порог: ${candidate.threshold}`,
     `Вероятность сетапа: ${candidate.probability}%`,
@@ -2675,7 +2915,26 @@ function smartMoneyCandidateText(candidate: SmartMoneyCandidate, index: number) 
     `Свеча: ${formatDate(candidate.timestamp)}`,
     "Режим: PAPER TRADING — реальные деньги не используются.",
     "Сигнал не является финансовой рекомендацией.",
-  ].join("\n");
+  ];
+  const context = await getPositionContext(chatId);
+  if (context) {
+    const plan = buildPositionPlan({
+      context,
+      ticker: candidate.ticker,
+      direction: candidate.direction,
+      entry: candidate.entryPrice,
+      stop: candidate.stopPrice,
+      targets: [candidate.takeProfit1, candidate.takeProfit2, candidate.takeProfit3],
+      score: candidate.score,
+      volumeConfirmed: candidate.volumeConfirmed,
+      retestConfirmed: candidate.retestConfirmed,
+      marketRegime: candidate.marketRegime,
+    });
+    if (plan) lines.push(...positionPlanText(plan, context.bankRub, context.usdRub));
+  } else if (chatId !== undefined) {
+    lines.push("", `📐 Усреднение: банк не задан. Нажмите «${AVERAGING_BUTTON}».`);
+  }
+  return lines.join("\n");
 }
 
 function commodityName(ticker: string) {
@@ -2845,8 +3104,10 @@ async function commoditiesText(chatId?: number): Promise<TelegramMessage> {
       latestCommodityQuotes(),
     ]);
     const records = await recordCommodityCandidates(scan.candidates);
-    const blocks = scan.candidates.map((candidate, index) =>
-      smartMoneyCandidateText(candidate, index + 1),
+    const blocks = await Promise.all(
+      scan.candidates.map((candidate, index) =>
+        smartMoneyCandidateText(candidate, index + 1, chatId),
+      ),
     );
     return {
       text: [
@@ -2959,8 +3220,10 @@ async function moneyTestText(chatId?: number): Promise<TelegramMessage> {
         : scan.market.direction === "SELL"
           ? "медвежий"
           : "нейтральный";
-    const blocks = scan.candidates.map((candidate, index) =>
-      smartMoneyCandidateText(candidate, index + 1),
+    const blocks = await Promise.all(
+      scan.candidates.map((candidate, index) =>
+        smartMoneyCandidateText(candidate, index + 1, chatId),
+      ),
     );
     const rejectedPreview = scan.rejected
       .slice(0, 5)
@@ -3282,12 +3545,12 @@ async function runMoneyTestScanCycle() {
     );
     if (moneyTestNotifier && records.recordedCandidates.length) {
       for (const candidate of records.recordedCandidates) {
-        const message = [
-          "💵 НОВЫЙ СИГНАЛ · ДЕНЬГИ ТЕСТ",
-          "",
-          smartMoneyCandidateText(candidate, 1),
-        ].join("\n");
         for (const chatId of moneyTestChatIds) {
+          const message = [
+            "💵 НОВЫЙ СИГНАЛ · ДЕНЬГИ ТЕСТ",
+            "",
+            await smartMoneyCandidateText(candidate, 1, chatId),
+          ].join("\n");
           await moneyTestNotifier(chatId, message);
         }
       }
@@ -3578,12 +3841,12 @@ async function runCommodityScanCycle() {
     const records = await recordCommodityCandidates(scan.candidates);
     if (commodityNotifier && records.recordedCandidates.length) {
       for (const candidate of records.recordedCandidates) {
-        const message = [
-          "🪙 НОВЫЙ СИГНАЛ · СЫРЬЁ И МЕТАЛЛЫ",
-          "",
-          smartMoneyCandidateText(candidate, 1),
-        ].join("\n");
         for (const chatId of commodityChatIds) {
+          const message = [
+            "🪙 НОВЫЙ СИГНАЛ · СЫРЬЁ И МЕТАЛЛЫ",
+            "",
+            await smartMoneyCandidateText(candidate, 1, chatId),
+          ].join("\n");
           await commodityNotifier(chatId, message);
         }
       }
@@ -3609,10 +3872,11 @@ function waveHorizonMinutes(timeframe: string) {
   return timeframe === "30m" ? 720 : 1440;
 }
 
-function waveCandidateText(
+async function waveCandidateText(
   candidate: ElliottCandidate,
   index: number,
   signalId: number | null,
+  chatId?: number,
 ) {
   const isLong = candidate.direction === "BUY";
   const fib = candidate.fibonacci;
@@ -3622,7 +3886,7 @@ function waveCandidateText(
     : `Исторический win rate: ${formatNumber(historical.winRate, 1)}% · test: ${formatNumber(historical.testWinRate, 1)}%`;
   const targetSign = isLong ? "+" : "-";
   const stopSign = isLong ? "-" : "+";
-  return [
+  const lines = [
     `${index}. ${candidate.ticker} — ${isLong ? "LONG" : "SHORT"} · ${candidate.timeframe}`,
     `Сценарий: ${candidate.scenario}`,
     `Уверенность структуры: ${formatNumber(candidate.confidence, 0)}%`,
@@ -3649,7 +3913,22 @@ function waveCandidateText(
       ? `ID сигнала: ${signalId} · отметьте результат кнопкой или /wave_result ${signalId} 1.25`
       : "Сигнал не записан",
     "Режим: PAPER TRADING — реальные сделки не совершаются",
-  ].join("\n");
+  ];
+  const context = await getPositionContext(chatId);
+  if (context) {
+    const direction = isLong ? "BUY" : "SELL";
+    const plan = buildPositionPlan({
+      context,
+      ticker: candidate.ticker,
+      direction,
+      entry: candidate.entryPrice,
+      stop: candidate.stopPrice,
+      targets: threeTargetsFromSingle(candidate.entryPrice, candidate.targetPrice, direction),
+      score: candidate.confidence,
+    });
+    if (plan) lines.push(...positionPlanText(plan, context.bankRub, context.usdRub));
+  }
+  return lines.join("\n");
 }
 
 async function recordWaveCandidates(candidates: ElliottCandidate[]) {
@@ -3780,14 +4059,16 @@ async function refreshWaveData() {
   return latestWaveRefresh;
 }
 
-async function wavesText(): Promise<TelegramMessage> {
+async function wavesText(chatId?: number): Promise<TelegramMessage> {
   try {
     await refreshWaveData();
     const scan = await scanElliottWaveStrategies();
     const records = await recordWaveCandidates(scan.candidates);
-    const blocks = records
-      .map(({ candidate, signalId }, index) => waveCandidateText(candidate, index + 1, signalId))
-      .flatMap((block) => [block, ""]);
+    const blocks = await Promise.all(
+      records.map(({ candidate, signalId }, index) =>
+        waveCandidateText(candidate, index + 1, signalId, chatId),
+      ),
+    );
     const buttons = records
       .filter(({ signalId }) => signalId !== null)
       .flatMap(({ signalId }) => [
@@ -3869,14 +4150,16 @@ async function runWaveScanCycle() {
   }
 }
 
-async function intradayText() {
+async function intradayText(chatId?: number) {
   try {
     await refreshLatestIntradayData();
     const scan = await scanIntraday();
     const paperStatuses = await recordIntradayCandidates(scan.candidates);
-    const blocks = scan.candidates
-      .map((candidate, index) => intradayCandidateText(candidate, index + 1))
-      .filter((block): block is string => Boolean(block));
+    const blocks = (await Promise.all(
+      scan.candidates.map((candidate, index) =>
+        intradayCandidateText(candidate, index + 1, chatId),
+      ),
+    )).filter((block): block is string => Boolean(block));
     const unavailablePreview = scan.unavailable.slice(0, 3);
     return [
       "⚡ ВНУТРИДНЕВНОЙ СКАНЕР IMOEX",
@@ -3969,12 +4252,12 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
 async function notifySmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
   if (!smartMoneyNotifier || !smartMoneyChatIds.size) return;
   for (const candidate of candidates) {
-    const message = [
-      "💰 НОВЫЙ СИГНАЛ · SMART MONEY",
-      "",
-      smartMoneyCandidateText(candidate, 1),
-    ].join("\n");
     for (const chatId of smartMoneyChatIds) {
+      const message = [
+        "💰 НОВЫЙ СИГНАЛ · SMART MONEY",
+        "",
+        await smartMoneyCandidateText(candidate, 1, chatId),
+      ].join("\n");
       await smartMoneyNotifier(chatId, message);
     }
   }
@@ -3990,8 +4273,10 @@ async function smartMoneyText(chatId?: number) {
     const scan = await scanSmartMoney();
     const records = await recordSmartMoneyCandidates(scan.candidates);
     await notifySmartMoneyCandidates(records.recordedCandidates);
-    const blocks = scan.candidates.map((candidate, index) =>
-      smartMoneyCandidateText(candidate, index + 1),
+    const blocks = await Promise.all(
+      scan.candidates.map((candidate, index) =>
+        smartMoneyCandidateText(candidate, index + 1, chatId),
+      ),
     );
     const rejectionPreview = Object.entries(scan.filterStats)
       .filter(([, count]) => count > 0)
@@ -4710,7 +4995,7 @@ async function imoexText() {
   ].join("\n");
 }
 
-async function signalText(ticker: string) {
+async function signalText(ticker: string, chatId?: number) {
   try {
     await refreshLatestMarketData();
   } catch (error) {
@@ -4782,7 +5067,7 @@ async function signalText(ticker: string) {
     feature.timestamp.getTime() + PAPER_HORIZON_MINUTES * 60_000,
   );
 
-  return [
+  const lines = [
     `📊 ${ticker}`,
     `Сигнал: ${directionLabel(analysis.direction)}`,
     `Прогноз/уверенность: ${analysis.confidence}%`,
@@ -4805,7 +5090,26 @@ async function signalText(ticker: string) {
     paperRecordText(recorded),
     "",
     "Важно: это статистический исследовательский сигнал, не финансовая рекомендация.",
-  ].join("\n");
+  ];
+  const context = await getPositionContext(chatId);
+  if (context && (analysis.direction === "BUY" || analysis.direction === "SELL")) {
+    const plan = buildPositionPlan({
+      context,
+      ticker,
+      direction: analysis.direction === "SELL" ? "SELL" : "BUY",
+      entry: feature.close,
+      stop: analysis.stop,
+      targets: threeTargetsFromSingle(
+        feature.close,
+        analysis.target,
+        analysis.direction === "SELL" ? "SELL" : "BUY",
+      ),
+      score: analysis.confidence,
+      marketRegime: marketRegime(latestMarket?.imoexChange),
+    });
+    if (plan) lines.push(...positionPlanText(plan, context.bankRub, context.usdRub));
+  }
+  return lines.join("\n");
 }
 
 type CompanyCandle = {
@@ -5050,7 +5354,7 @@ function companyTimeframeText(analysis: CompanyTimeframeAnalysis) {
   ].join("\n");
 }
 
-async function companyAnalysisText(input: string) {
+async function companyAnalysisText(input: string, chatId?: number) {
   const resolved = await resolveCompanyTicker(input);
   if (!resolved) return "";
   const { ticker } = resolved;
@@ -5064,7 +5368,7 @@ async function companyAnalysisText(input: string) {
       return "";
     }
     await recordSmartMoneyCandidates([candidate]);
-    return smartMoneyCandidateText(candidate, 1);
+    return smartMoneyCandidateText(candidate, 1, chatId);
   } catch (error) {
     logger.error({ err: error, ticker }, "Company analysis failed");
     return "";
@@ -5294,6 +5598,20 @@ async function handleMessage(chatId: number, text: string) {
   const normalizedCommand = command.toLowerCase().split("@", 1)[0];
   const normalizedText = trimmedText.toLocaleLowerCase("ru-RU");
 
+  if (pendingBankChats.has(chatId) && !trimmedText.startsWith("/")) {
+    const bankRub = parseBankRub(trimmedText);
+    if (bankRub === null) {
+      return "Не понял сумму. Укажите банк числом, например: 500000, 500 000, 500к или 500000 ₽.";
+    }
+    await saveBankRub(chatId, bankRub);
+    pendingBankChats.delete(chatId);
+    return [
+      "✅ Банк сохранён.",
+      `Ваш банк: ${formatRub(bankRub)}`,
+      "Теперь в новых сигналах будет расчёт основного входа, двух усреднений, средней цены, стопа и TP1–TP3.",
+    ].join("\n");
+  }
+
   if (normalizedCommand === "/start" || normalizedCommand === "/help") {
     return helpText();
   }
@@ -5316,11 +5634,36 @@ async function handleMessage(chatId: number, text: string) {
   ) {
     const tickerOrName = trimmedText.split(/\s+/).slice(1).join(" ").trim();
     return tickerOrName
-      ? companyAnalysisText(tickerOrName)
+      ? companyAnalysisText(tickerOrName, chatId)
       : companyAnalysisPicker();
   }
+  if (isAveragingRequest(text)) {
+    const bankInput =
+      normalizedCommand === "/bank" || normalizedCommand === "/setbank"
+        ? trimmedText.slice(command.length).trim()
+        : "";
+    if (bankInput) {
+      const bankRub = parseBankRub(bankInput);
+      if (bankRub === null) {
+        return "Не понял сумму. Пример: /bank 500000 или /bank 500к.";
+      }
+      await saveBankRub(chatId, bankRub);
+      pendingBankChats.delete(chatId);
+      return `✅ Банк изменён: ${formatRub(bankRub)}. Расчёты усреднения будут использовать эту сумму.`;
+    }
+    const current = await getPositionContext(chatId);
+    pendingBankChats.add(chatId);
+    return [
+      "📐 Настройка усреднения",
+      current ? `Текущий банк: ${formatRub(current.bankRub)}` : "Банк пока не задан.",
+      "",
+      "Напишите сумму банка в рублях.",
+      "Примеры: 500000, 500 000, 500к или 500000 ₽.",
+      "Эта сумма будет доступна отдельно для каждого сигнала.",
+    ].join("\n");
+  }
   if (isIntradayRequest(text)) {
-    return intradayText();
+    return intradayText(chatId);
   }
   if (isSmartMoneyRequest(text)) {
     return smartMoneyText(chatId);
@@ -5332,7 +5675,7 @@ async function handleMessage(chatId: number, text: string) {
     return moneyTestText(chatId);
   }
   if (isWavesRequest(text)) {
-    return wavesText();
+    return wavesText(chatId);
   }
   if (isWaveStatsRequest(text)) {
     return waveStatsText();
@@ -5360,7 +5703,7 @@ async function handleMessage(chatId: number, text: string) {
   }
   if (normalizedCommand === "/signal") {
     const ticker = argument?.toUpperCase().replace(/[^A-Z0-9_]/g, "");
-    return ticker ? signalText(ticker) : "Укажите тикер: /signal SBER";
+    return ticker ? signalText(ticker, chatId) : "Укажите тикер: /signal SBER";
   }
   if (normalizedCommand === "/wave_result") {
     const parts = trimmedText.split(/\s+/);
@@ -5531,6 +5874,7 @@ export function startTelegramBot() {
           { command: "smartmoney", description: "Smart Money SMC-сетапы IMOEX" },
           { command: "commodities", description: "Золото, серебро и Brent · Smart Money" },
           { command: "moneytest", description: "Экспериментальный intraday Smart Money" },
+          { command: "bank", description: "Установить или изменить банк усреднения" },
           { command: "waves", description: "Волны Эллиотта и Fibonacci" },
           { command: "wave_stats", description: "Статистика волновых сигналов" },
           { command: "top", description: "Лучшие сигналы" },
@@ -5581,7 +5925,7 @@ export function startTelegramBot() {
                     .slice("signal:".length)
                     .toUpperCase()
                     .replace(/[^A-Z0-9_]/g, "");
-                  const response = await signalText(ticker);
+                  const response = await signalText(ticker, callbackChatId);
                   await client.sendMessage(callbackChatId, response);
                   logger.info({ ticker }, "Telegram ticker signal sent");
                 }
@@ -5590,7 +5934,7 @@ export function startTelegramBot() {
                     .slice("analysis:".length)
                     .toUpperCase()
                     .replace(/[^A-Z0-9_]/g, "");
-                  const response = await companyAnalysisText(ticker);
+                  const response = await companyAnalysisText(ticker, callbackChatId);
                   if (response) {
                     await client.sendMessage(callbackChatId, response);
                     logger.info({ ticker }, "Telegram company Smart Money signal sent");

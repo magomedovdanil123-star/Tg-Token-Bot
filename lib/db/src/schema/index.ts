@@ -631,6 +631,20 @@ export const telegramMoneyTestSubscriptions = pgTable(
   },
 );
 
+export const telegramPositionSettings = pgTable(
+  "telegram_position_settings",
+  {
+    chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
+    bankRub: doublePrecision("bank_rub").notNull(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
 export const strategyResults = pgTable(
   "strategy_results",
   {
@@ -755,6 +769,7 @@ export type TelegramCommoditySubscription =
   typeof telegramCommoditySubscriptions.$inferSelect;
 export type TelegramMoneyTestSubscription =
   typeof telegramMoneyTestSubscriptions.$inferSelect;
+export type TelegramPositionSetting = typeof telegramPositionSettings.$inferSelect;
 export type StrategyResult = typeof strategyResults.$inferSelect;
 export type BacktestResult = typeof backtestResults.$inferSelect;
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
