@@ -22,10 +22,9 @@ export type ReplitScan = {
   candidates: ReplitCandidate[];
 };
 
-const TARGET_PERCENT = 1;
-const STOP_PERCENT = 0.75;
-const MIN_SCORE = 5;
-const MIN_VALIDATED_OCCURRENCES = 100;
+const TARGET_PERCENT = 1.5;
+const STOP_PERCENT = 1.5;
+const EXPERIMENTAL_SCORE = 2;
 
 type HourCandle = {
   timestamp: Date;
@@ -160,21 +159,6 @@ async function loadLatestPrices() {
   return prices;
 }
 
-async function hasValidatedEvidence() {
-  const result = await db.execute(sql`
-    SELECT 1
-    FROM feature_combinations
-    WHERE is_active = true
-      AND name = 'replit:mts'
-      AND statistical_significance = true
-      AND occurrences >= ${MIN_VALIDATED_OCCURRENCES}
-      AND COALESCE(test_expected_value, 0) > 0
-      AND COALESCE(test_profit_factor, 0) > 1
-    LIMIT 1
-  `);
-  return result.rows.length > 0;
-}
-
 function currentOneMinutePrice(
   ticker: string,
   latestPrices: Map<string, { price: number; timestamp: Date }>,
@@ -213,11 +197,6 @@ function candidateFor(
     return null;
   }
   const closes = closed.map((row) => row.close);
-  const ema10 = ema(closes, 10);
-  const ema30 = ema(closes, 30);
-  const prior = closed.slice(-13, -1);
-  const priorHigh = Math.max(...prior.map((row) => row.high));
-  const priorLow = Math.min(...prior.map((row) => row.low));
   const averageVolume = average(
     closed.slice(-21, -1).map((row) => row.volume),
   );
@@ -233,39 +212,22 @@ function candidateFor(
     threeHoursAgo && threeHoursAgo.close > 0
       ? current.close / threeHoursAgo.close - 1
       : 0;
-  if (
-    ema10 === null ||
-    ema30 === null ||
-    averageVolume === null ||
-    !Number.isFinite(momentum)
-  ) {
+  if (averageVolume === null || !Number.isFinite(momentum)) {
     return null;
   }
 
-  const longScore = [
-    ema10 > ema30,
-    current.close > ema10,
-    momentum >= 0.0035,
-    relativeVolume >= 1.3,
-    current.close > current.open && bodyPosition >= 0.55,
-    current.close > priorHigh,
-  ].filter(Boolean).length;
+  // Experimental Replit/MTS setup discovered on the historical 1H archive:
+  // a volume shock (>=2x its prior 20-bar average), negative 3H momentum,
+  // and a strong bearish candle. Two of the three confirmations are enough
+  // for this intentionally paper-only experiment.
   const shortScore = [
-    ema10 < ema30,
-    current.close < ema10,
-    momentum <= -0.0035,
-    relativeVolume >= 1.3,
-    current.close < current.open && bodyPosition <= -0.55,
-    current.close < priorLow,
+    relativeVolume >= 2,
+    momentum <= -0.003,
+    current.close < current.open && bodyPosition <= -0.25,
   ].filter(Boolean).length;
-  const direction =
-    longScore >= MIN_SCORE
-      ? "BUY"
-      : shortScore >= MIN_SCORE
-        ? "SELL"
-        : null;
-  const score = Math.max(longScore, shortScore);
-  if (!direction) return null;
+  if (shortScore < EXPERIMENTAL_SCORE) return null;
+  let direction: ReplitDirection = "SELL";
+  const score = shortScore;
 
   const entryPrice = currentOneMinutePrice(
     ticker,
@@ -274,14 +236,8 @@ function candidateFor(
     now,
   );
   if (entryPrice === null) return null;
-  const takeProfit =
-    direction === "BUY"
-      ? entryPrice * (1 + TARGET_PERCENT / 100)
-      : entryPrice * (1 - TARGET_PERCENT / 100);
-  const stopLoss =
-    direction === "BUY"
-      ? entryPrice * (1 - STOP_PERCENT / 100)
-      : entryPrice * (1 + STOP_PERCENT / 100);
+  const takeProfit = entryPrice * (1 - TARGET_PERCENT / 100);
+  const stopLoss = entryPrice * (1 + STOP_PERCENT / 100);
   return {
     ticker,
     direction,
@@ -298,13 +254,6 @@ function candidateFor(
 
 export async function scanReplitStrategy(): Promise<ReplitScan> {
   const generatedAt = new Date();
-  // The rule set is intentionally fail-closed. The archive currently has no
-  // statistically significant positive out-of-sample
-  // MTS combination after costs, so do not emit attractive-looking but losing
-  // signals until this strategy itself has a validated combination.
-  if (!(await hasValidatedEvidence())) {
-    return { generatedAt, analyzed: 0, candidates: [] };
-  }
   const [hourlyRows, latestPrices] = await Promise.all([
     loadHourlyRows(),
     loadLatestPrices(),

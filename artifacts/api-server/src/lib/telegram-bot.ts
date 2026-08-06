@@ -3402,11 +3402,13 @@ async function moneyTestText(chatId?: number): Promise<TelegramMessage> {
 async function replitCandidateText(candidate: ReplitCandidate) {
   const direction = candidate.direction === "BUY" ? "Long" : "Short";
   return [
-    `MTS ${direction}`,
+    `MTS Experimental ${direction}`,
     `${candidate.ticker}`,
+    "Сетап: 2 из 3 — объём 2× / momentum -0,3% / красная свеча",
     `Вход: ${formatNumber(candidate.entryPrice)}`,
     `Take: ${formatNumber(candidate.takeProfit)}`,
     `Stop: ${formatNumber(candidate.stopLoss)}`,
+    "Режим: PAPER TRADING",
   ].join("\n");
 }
 
@@ -3436,7 +3438,7 @@ async function recordReplitCandidates(candidates: ReplitCandidate[]) {
       entryPrice: candidate.entryPrice,
       stopPrice: candidate.stopLoss,
       targetPrice: candidate.takeProfit,
-      horizonMinutes: 60,
+       horizonMinutes: 24 * 60,
       reasons: [],
       patternIds: [],
       combinationIds: [],
@@ -3445,6 +3447,8 @@ async function recordReplitCandidates(candidates: ReplitCandidate[]) {
       bypassRiskLimits: true,
       metadata: {
         strategy: "MTS",
+        setup: "momentum_volume_short_2_of_3",
+        experimental: true,
         strategyTimeframe: "1h",
         executionTimeframe: "1m",
         setupCandleTimestamp: candidate.candleTimestamp.toISOString(),
