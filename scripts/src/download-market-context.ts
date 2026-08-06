@@ -90,6 +90,15 @@ function numberValue(value: unknown) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function parseMoexTimestamp(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return new Date(Number.NaN);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2}(?:\.\d+)?)?$/.test(text)) {
+    return new Date(`${text.replace(" ", "T")}+03:00`);
+  }
+  return new Date(text);
+}
+
 async function fetchJson(path: string, params: Record<string, string | number>) {
   const url = new URL(`${API_ROOT}${path}`);
   url.searchParams.set("iss.meta", "off");
@@ -121,7 +130,7 @@ async function loadObservations(instrument: InstrumentSpec, from: string, till: 
     );
     const block = rows(response, "candles");
     for (const row of block) {
-      const timestamp = new Date(String(row.begin ?? row.end ?? ""));
+      const timestamp = parseMoexTimestamp(row.begin ?? row.end);
       const open = numberValue(row.open);
       const close = numberValue(row.close);
       if (Number.isNaN(timestamp.getTime()) || close === undefined) continue;

@@ -23,6 +23,18 @@ type CandleRow = {
   value?: number | null;
 };
 
+function parseMoexTimestamp(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return new Date(Number.NaN);
+  // MOEX returns candle timestamps without an offset, in Europe/Moscow time.
+  // The API server runs in UTC, so parsing the raw string directly shifts
+  // every intraday candle three hours into the future.
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2}(?:\.\d+)?)?$/.test(text)) {
+    return new Date(`${text.replace(" ", "T")}+03:00`);
+  }
+  return new Date(text);
+}
+
 function arg(name: string, fallback: string): string {
   const prefix = `--${name}=`;
   const value = process.argv.find((item) => item.startsWith(prefix));
@@ -47,6 +59,10 @@ const IS_RAW_ONLY_TIMEFRAME = !IS_FEATURE_TIMEFRAME;
 const PAGE_SIZE = 500;
 const REQUEST_DELAY_MS = 120;
 const LOOKBACK_DAYS = Math.max(1, Number(arg("days", "5")) || 5);
+const MARKET_CONTEXT_MAX_GAP_MS = {
+  "1m": 15 * 60 * 1000,
+  "1h": 90 * 60 * 1000,
+} as const;
 const SECOND_TIER_TICKER_NAMES: Record<string, string> = {
   ABIO: "Артген",
   AKRN: "Акрон",
@@ -198,7 +214,7 @@ async function getCandles(
     if (rows.length === 0) break;
 
     for (const row of rows) {
-      const timestamp = new Date(String(row.begin ?? row.end ?? ""));
+      const timestamp = parseMoexTimestamp(row.begin ?? row.end);
       const open = numeric(row.open);
       const high = numeric(row.high);
       const low = numeric(row.low);
@@ -963,6 +979,46 @@ async function main() {
         "index",
         "SNDX",
       );
+      if (TIMEFRAME in MARKET_CONTEXT_MAX_GAP_MS) {
+        const latestIndexTimestamp = indexRows.reduce<Date | null>(
+          (latest, row) =>
+            !latest || row.timestamp > latest ? row.timestamp : latest,
+          null,
+        );
+        const latestAssetResult = await db.execute(sql`
+          SELECT MAX(timestamp) AS latest
+          FROM candles
+          WHERE timeframe = ${TIMEFRAME}
+            AND ticker <> 'IMOEX'
+            AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+        `);
+        const rawLatestAsset = (
+          latestAssetResult.rows[0] as { latest?: unknown } | undefined
+        )?.latest;
+        const latestAssetTimestamp =
+          rawLatestAsset instanceof Date
+            ? rawLatestAsset
+            : rawLatestAsset
+              ? new Date(String(rawLatestAsset))
+              : null;
+        const maxGapMs =
+          MARKET_CONTEXT_MAX_GAP_MS[TIMEFRAME as keyof typeof MARKET_CONTEXT_MAX_GAP_MS];
+        const gapMs =
+          latestIndexTimestamp && latestAssetTimestamp
+            ? latestAssetTimestamp.getTime() - latestIndexTimestamp.getTime()
+            : null;
+        if (
+          !latestIndexTimestamp ||
+          !latestAssetTimestamp ||
+          gapMs === null ||
+          !Number.isFinite(gapMs) ||
+          gapMs > maxGapMs
+        ) {
+          throw new Error(
+            `IMOEX неактуален для ${TIMEFRAME}: индекс ${latestIndexTimestamp?.toISOString() ?? "отсутствует"}, акции ${latestAssetTimestamp?.toISOString() ?? "отсутствуют"}.`,
+          );
+        }
+      }
       candlesLoaded += await saveCandles(indexRows);
       if (IS_FEATURE_TIMEFRAME) {
         featuresCalculated += await calculateLatestFeature("IMOEX");

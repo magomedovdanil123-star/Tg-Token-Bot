@@ -557,7 +557,10 @@ export async function scanSmartMoney(
       timeframe === "1m" ? SMART_MONEY_1M_MAX_AGE_MS : SMART_MONEY_1H_MAX_AGE_MS;
     if (!latest) return `${ticker}: отсутствуют свечи ${timeframe}.`;
     const ageMs = generatedAt.getTime() - latest.getTime();
-    if (!Number.isFinite(ageMs) || ageMs > maxAgeMs) {
+    if (!Number.isFinite(ageMs) || ageMs < -5 * 60 * 1000) {
+      return `${ticker}: свеча ${timeframe} имеет время из будущего: ${latest.toISOString()}.`;
+    }
+    if (ageMs > maxAgeMs) {
       return `${ticker}: свеча ${timeframe} устарела на ${Math.max(0, ageMs / 60_000).toFixed(0)} мин. Последняя: ${latest.toISOString()}.`;
     }
     return null;
