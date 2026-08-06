@@ -19,3 +19,4 @@
 - [Development schema changes](dev-schema-migrations.md) — Drizzle schema conflicts can block non-interactive pushes; use the standard post-merge/publish database flow.
 - [Strict Telegram entries](strict-telegram-entries.md) — live SMC notifications require high score, retest, HTF confirmation and stronger net R:R; early structural exits have a grace period.
 - [MOEX timestamp timezone](moex-timestamp-timezone.md) — ISS timestamps without an offset are Moscow time; parse them explicitly as Europe/Moscow on UTC hosts.
+- [Local Telegram isolation](local-telegram-isolation.md) — Replit development must never poll the production Telegram bot token.

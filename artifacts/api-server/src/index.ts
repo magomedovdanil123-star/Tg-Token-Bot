@@ -16,7 +16,14 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-const telegramStop = startTelegramBot();
+const telegramDisabled =
+  process.env["TELEGRAM_BOT_DISABLED"] === "true" ||
+  process.env["NODE_ENV"] === "development";
+const telegramStop = telegramDisabled
+    ? () => {
+        logger.info("Telegram bot disabled for this API process");
+      }
+    : startTelegramBot();
 const server = app.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
