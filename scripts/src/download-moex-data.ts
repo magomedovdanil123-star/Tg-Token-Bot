@@ -7,6 +7,7 @@ import {
   marketContext,
   moexTickers,
   pool,
+  SECOND_TIER_TICKERS,
 } from "@workspace/db";
 
 type JsonBlock = { columns?: string[]; data?: unknown[][] };
@@ -46,11 +47,45 @@ const IS_RAW_ONLY_TIMEFRAME = !IS_FEATURE_TIMEFRAME;
 const PAGE_SIZE = 500;
 const REQUEST_DELAY_MS = 120;
 const LOOKBACK_DAYS = Math.max(1, Number(arg("days", "5")) || 5);
-const MONEY_TEST_TICKERS = [
-  { secid: "SMLT", shortName: "Самолёт" },
-  { secid: "SOFL", shortName: "Софтлайн" },
-  { secid: "DELI", shortName: "Делимобиль" },
-] as const;
+const SECOND_TIER_TICKER_NAMES: Record<string, string> = {
+  ABIO: "Артген",
+  AKRN: "Акрон",
+  APTK: "Аптеки36и6",
+  BAZA: "Базис",
+  BTBR: "В2В-РТС",
+  DATA: "Аренадата",
+  DELI: "Делимобиль",
+  DIAS: "Диасофт",
+  ETLN: "Эталон",
+  FESH: "ДВМП",
+  GLRX: "ГЛОРАКС",
+  HNFG: "ХЭНДЕРСОН",
+  IVAT: "ИВА",
+  KMAZ: "КАМАЗ",
+  MRKC: "Россети Центр",
+  MRKP: "Россети Центр и Приволжье",
+  MRKU: "Россети Урал",
+  MRKV: "Россети Волга",
+  MRKZ: "Россети Северо-Запад",
+  MSRS: "Россети Сибирь",
+  OGKB: "ОГК-2",
+  PRMD: "Промомед",
+  RASP: "Распадская",
+  SNGS: "Сургутнефтегаз",
+  SNGSP: "Сургутнефтегаз-п",
+  SOFL: "Софтлайн",
+  SVAV: "СОЛЛЕРС",
+  TGKN: "ТГК-14",
+  TRMK: "ТМК",
+  UGLD: "Южуралзолото",
+  VSMO: "ВСМПО-АВИСМА",
+  WUSH: "ВУШ Холдинг",
+};
+
+const SECOND_TIER_TICKER_ROWS = SECOND_TIER_TICKERS.map((secid) => ({
+  secid,
+  shortName: SECOND_TIER_TICKER_NAMES[secid] ?? secid,
+}));
 
 function integerArg(name: string, fallback: number): number {
   const value = Number(arg(name, String(fallback)));
@@ -869,14 +904,14 @@ async function main() {
       for (let index = 0; index < allTickers.length; index += 1) {
         await saveTicker(allTickers[index], index + 1);
       }
-      for (const ticker of MONEY_TEST_TICKERS) {
+      for (const ticker of SECOND_TIER_TICKER_ROWS) {
         await saveTicker(ticker, 0, false);
       }
     }
     const selectedTickers = requestedTicker
       ? [
           allTickers.find((ticker) => ticker.secid === requestedTicker) ??
-            MONEY_TEST_TICKERS.find((ticker) => ticker.secid === requestedTicker) ?? {
+            SECOND_TIER_TICKER_ROWS.find((ticker) => ticker.secid === requestedTicker) ?? {
               secid: requestedTicker,
               shortName: null,
               capitalization: undefined,
@@ -884,7 +919,7 @@ async function main() {
         ]
       : [
           ...allTickers,
-          ...MONEY_TEST_TICKERS.filter(
+          ...SECOND_TIER_TICKER_ROWS.filter(
             (extra) => !allTickers.some((ticker) => ticker.secid === extra.secid),
           ),
         ];

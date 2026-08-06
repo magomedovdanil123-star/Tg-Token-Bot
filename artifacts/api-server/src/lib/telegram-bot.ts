@@ -15,6 +15,7 @@ import {
   patternStatistics,
   pool,
   signalsHistory,
+  SECOND_TIER_TICKERS,
   telegramCommoditySubscriptions,
   telegramMoneyTestSubscriptions,
   telegramPositionSettings,
@@ -4363,7 +4364,10 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
         WHERE timeframe = '1h'
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
-            OR ticker IN ('SMLT', 'SOFL', 'DELI')
+            OR ticker IN (${sql.join(
+              SECOND_TIER_TICKERS.map((ticker) => sql`${ticker}`),
+              sql`, `,
+            )})
           )
         GROUP BY ticker
       ) latest_by_ticker
@@ -4430,7 +4434,10 @@ async function ensureSmartMoneyDataFresh() {
         WHERE timeframe IN ('1m', '1h')
           AND (
             ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
-            OR ticker IN ('SMLT', 'SOFL', 'DELI')
+            OR ticker IN (${sql.join(
+              SECOND_TIER_TICKERS.map((ticker) => sql`${ticker}`),
+              sql`, `,
+            )})
           )
       GROUP BY ticker, timeframe
     ) latest_by_ticker

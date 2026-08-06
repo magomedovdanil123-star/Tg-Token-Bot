@@ -1,4 +1,4 @@
-import { db } from "@workspace/db";
+import { db, SECOND_TIER_TICKERS } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import {
   scanSmartMoney,
@@ -163,9 +163,38 @@ async function liquidityByTicker() {
 function moneyTestTickerName(ticker: string) {
   return (
     {
-      SMLT: "Самолёт",
-      SOFL: "Софтлайн",
-      DELI: "Делимобиль",
+       ABIO: "Артген",
+       AKRN: "Акрон",
+       APTK: "Аптеки36и6",
+       BAZA: "Базис",
+       BTBR: "В2В-РТС",
+       DATA: "Аренадата",
+       DELI: "Делимобиль",
+       DIAS: "Диасофт",
+       ETLN: "Эталон",
+       FESH: "ДВМП",
+       GLRX: "ГЛОРАКС",
+       HNFG: "ХЭНДЕРСОН",
+       IVAT: "ИВА",
+       KMAZ: "КАМАЗ",
+       MRKC: "Россети Центр",
+       MRKP: "Россети Центр и Приволжье",
+       MRKU: "Россети Урал",
+       MRKV: "Россети Волга",
+       MRKZ: "Россети Северо-Запад",
+       MSRS: "Россети Сибирь",
+       OGKB: "ОГК-2",
+       PRMD: "Промомед",
+       RASP: "Распадская",
+       SNGS: "Сургутнефтегаз",
+       SNGSP: "Сургутнефтегаз-п",
+       SOFL: "Софтлайн",
+       SVAV: "СОЛЛЕРС",
+       TGKN: "ТГК-14",
+       TRMK: "ТМК",
+       UGLD: "Южуралзолото",
+       VSMO: "ВСМПО-АВИСМА",
+       WUSH: "ВУШ Холдинг",
     }[ticker] ?? ticker
   );
 }
@@ -219,7 +248,7 @@ export async function scanMoneyTest(): Promise<MoneyTestScan> {
     }
     return true;
   });
-  const diagnostics = MONEY_TEST_TICKERS.map((ticker) => {
+  const diagnostics = SECOND_TIER_TICKERS.map((ticker) => {
     const diagnostic = base.diagnostics.find((item) => item.ticker === ticker);
     const extra = rejected.find((item) => item.ticker === ticker);
     return {

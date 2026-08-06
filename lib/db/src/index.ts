@@ -1,6 +1,8 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "./schema";
+export { SECOND_TIER_TICKERS } from "./market-universe";
+export type { SecondTierTicker } from "./market-universe";
 
 const { Pool } = pg;
 
