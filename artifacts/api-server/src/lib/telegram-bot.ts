@@ -19,6 +19,7 @@ import {
   telegramCommoditySubscriptions,
   telegramMoneyTestSubscriptions,
   telegramPositionSettings,
+  telegramSmartMoneySubscriptions,
 } from "@workspace/db";
 import { logger } from "./logger";
 import { scanMarketAnalogues } from "./market-analog-scanner";
@@ -122,6 +123,36 @@ let moneyTestScanRunning = false;
 let moneyTestNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
 const moneyTestChatIds = new Set<number>();
 const pendingBankChats = new Set<number>();
+
+async function ensureTelegramSubscriptionTables() {
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS telegram_smart_money_subscriptions (
+      chat_id bigint PRIMARY KEY,
+      subscribed_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+}
+
+async function loadSmartMoneySubscriptions() {
+  const subscriptions = await db
+    .select({ chatId: telegramSmartMoneySubscriptions.chatId })
+    .from(telegramSmartMoneySubscriptions);
+  for (const subscription of subscriptions) {
+    if (Number.isSafeInteger(subscription.chatId)) {
+      smartMoneyChatIds.add(subscription.chatId);
+    }
+  }
+  logger.info({ count: smartMoneyChatIds.size }, "Smart Money Telegram subscriptions loaded");
+}
+
+async function subscribeSmartMoneyChat(chatId: number) {
+  if (!Number.isSafeInteger(chatId)) return;
+  smartMoneyChatIds.add(chatId);
+  await db
+    .insert(telegramSmartMoneySubscriptions)
+    .values({ chatId })
+    .onConflictDoNothing();
+}
 
 async function loadCommoditySubscriptions() {
   const subscriptions = await db
@@ -533,7 +564,32 @@ function buildPositionPlan(input: {
   const bank = currency === "USD" ? input.context.bankRub / (usdRub ?? 1) : input.context.bankRub;
   const allocation = positionAllocation(input);
   const levelFactors = input.direction === "BUY" ? [1, 0.985, 0.97] : [1, 1.015, 1.03];
-  const entries = levelFactors.map((factor) => input.entry * factor);
+  const fallbackStop =
+    input.direction === "BUY" ? input.entry * 0.99 : input.entry * 1.01;
+  const rawStop = input.stop ?? fallbackStop;
+  const stop =
+    input.direction === "BUY"
+      ? rawStop < input.entry
+        ? rawStop
+        : fallbackStop
+      : rawStop > input.entry
+        ? rawStop
+        : fallbackStop;
+  const riskDistance = Math.abs(input.entry - stop);
+  const levelGap = Math.max(riskDistance * 0.1, input.entry * 0.001);
+  const rawEntries = levelFactors.map((factor) => input.entry * factor);
+  const entries =
+    input.direction === "BUY"
+      ? [
+          input.entry,
+          Math.max(rawEntries[1], stop + levelGap * 2),
+          Math.max(rawEntries[2], stop + levelGap),
+        ]
+      : [
+          input.entry,
+          Math.min(rawEntries[1], stop - levelGap * 2),
+          Math.min(rawEntries[2], stop - levelGap),
+        ];
   const levels = entries.map((price, index) => ({
     label: index === 0 ? "Основной вход" : `${index}-е усреднение`,
     price,
@@ -550,7 +606,6 @@ function buildPositionPlan(input: {
       const percentFromEntry = (target - originalDistance) / originalDistance;
       return averagePrice * (1 + percentFromEntry);
     });
-    const stop = input.stop ?? (input.direction === "BUY" ? input.entry * 0.99 : input.entry * 1.01);
     const riskAtStop =
       input.direction === "BUY"
         ? (averagePrice - stop) * units
@@ -583,7 +638,7 @@ function positionPlanText(plan: PositionPlan, bankRub: number, usdRub: number | 
     "📐 РАСЧЁТ УСРЕДНЕНИЯ",
     `Банк на этот сигнал: ${formatRub(bankRub)}${plan.currency === "USD" ? ` · курс USD/RUB: ${formatNumber(usdRub, 2)}` : ""}`,
     `Распределение: ${plan.allocationLabel}`,
-    "Уровни: 1-е усреднение −/+1,5%, 2-е −/+3% от исходного входа",
+    "Уровни: ориентиры −/+1,5% и −/+3% от входа, но не за стопом",
     "",
     ...plan.levels.map(
       (level, index) =>
@@ -4294,7 +4349,7 @@ async function notifySmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
 
 async function smartMoneyText(chatId?: number) {
   if (chatId !== undefined && Number.isSafeInteger(chatId)) {
-    smartMoneyChatIds.add(chatId);
+    await subscribeSmartMoneyChat(chatId);
   }
   try {
     await ensureSmartMoneyDataFresh();
@@ -5929,6 +5984,8 @@ export function startTelegramBot() {
     try {
       const me = await client.getMe();
       await client.deleteWebhook();
+      await ensureTelegramSubscriptionTables();
+      await loadSmartMoneySubscriptions();
       await loadCommoditySubscriptions();
       await loadMoneyTestSubscriptions();
       await client.setMyCommands(

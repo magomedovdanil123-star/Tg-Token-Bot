@@ -631,6 +631,19 @@ export const telegramMoneyTestSubscriptions = pgTable(
   },
 );
 
+export const telegramSmartMoneySubscriptions = pgTable(
+  "telegram_smart_money_subscriptions",
+  {
+    chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
+    subscribedAt: timestamp("subscribed_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
 export const telegramPositionSettings = pgTable(
   "telegram_position_settings",
   {
