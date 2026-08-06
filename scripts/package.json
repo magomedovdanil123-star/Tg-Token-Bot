@@ -13,6 +13,7 @@
     "research-engine": "tsx ./src/research-discover.ts",
     "discover-candle-patterns": "tsx ./src/discover-candle-patterns.ts",
     "discover-professional-patterns": "tsx ./src/discover-professional-patterns.ts",
+    "discover-replit-strategy": "tsx ./src/discover-replit-strategy.ts",
     "refresh-levels-correlations": "tsx ./src/refresh-levels-correlations.ts",
     "research-refresh": "tsx ./src/research-refresh.ts",
     "smart-money-backtest": "tsx ./src/smart-money-backtest.ts",

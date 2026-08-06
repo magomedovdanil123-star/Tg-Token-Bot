@@ -22,3 +22,4 @@
 - [MOEX candle freshness](moex-candle-freshness.md) — candle timestamps mark interval starts; freshness uses close time, while SMC structure stays on closed bars.
 - [Local Telegram isolation](local-telegram-isolation.md) — Replit development must never poll the production Telegram bot token.
 - [Timeweb build cache](timeweb-build-cache.md) — rebuild db declarations and clear TypeScript caches when synced source exports appear missing on production.
+- [Replit/MTS event discovery](replit-discovery.md) — current event candidates are too unstable after causal IMOEX filtering and costs; keep the scanner fail-closed.
