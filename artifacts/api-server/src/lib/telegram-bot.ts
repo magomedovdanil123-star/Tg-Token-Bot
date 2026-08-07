@@ -818,7 +818,8 @@ async function recordPaperSignal(input: {
   const riskScope =
     input.source === "smartmoney" ||
     input.source === "commodity-smartmoney" ||
-    input.source === "money-test"
+    input.source === "money-test" ||
+    input.source === "alpha"
       ? sql`AND metadata ->> 'source' = ${input.source}`
     : sql``;
   const limits = input.bypassRiskLimits
@@ -3594,8 +3595,11 @@ async function alphaText(chatId?: number): Promise<TelegramMessage> {
   try {
     const scan = await scanAlphaStrategy();
     const retestRecords = await recordAlphaRetestCandidates(scan.retestCandidates);
-    const smRecords = await recordSmartMoneyCandidates(scan.smartMoneyCandidates);
-    await notifySmartMoneyCandidates(smRecords.recordedCandidates);
+    const smRecords = await recordSmartMoneyCandidates(
+      scan.smartMoneyCandidates,
+      "alpha",
+    );
+    await notifyAlphaSmartMoneyCandidates(smRecords.recordedCandidates);
 
     const retestBlocks = scan.retestCandidates.map(alphaRetestCandidateText);
     const smBlocks = await Promise.all(
@@ -3642,8 +3646,11 @@ async function runAlphaScanCycle() {
   try {
     const scan = await scanAlphaStrategy();
     const retestRecords = await recordAlphaRetestCandidates(scan.retestCandidates);
-    const smRecords = await recordSmartMoneyCandidates(scan.smartMoneyCandidates);
-    await notifySmartMoneyCandidates(smRecords.recordedCandidates);
+    const smRecords = await recordSmartMoneyCandidates(
+      scan.smartMoneyCandidates,
+      "alpha",
+    );
+    await notifyAlphaSmartMoneyCandidates(smRecords.recordedCandidates);
 
     if (alphaNotifier && alphaChatIds.size) {
       for (const candidate of retestRecords.recorded) {
@@ -4670,7 +4677,10 @@ async function intradayText(chatId?: number) {
   }
 }
 
-async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
+async function recordSmartMoneyCandidates(
+  candidates: SmartMoneyCandidate[],
+  source: "smartmoney" | "alpha" = "smartmoney",
+) {
   let recorded = 0;
   let duplicates = 0;
   let blocked = 0;
@@ -4688,7 +4698,7 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
       reasons: candidate.reasons,
       patternIds: [],
       combinationIds: [],
-      source: "smartmoney",
+      source,
       timeframe: "15m",
       // A valid ordinary Smart Money setup must reach subscribers even when
       // the paper-position control group is full. Recording it also preserves
@@ -4696,6 +4706,7 @@ async function recordSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
       bypassRiskLimits: true,
       metadata: {
         smartMoney: true,
+        source,
         timeframe: "15m",
         setupTimeframe: "15m",
         executionTimeframe: "1m",
@@ -4742,6 +4753,20 @@ async function notifySmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
         await smartMoneyCandidateText(candidate, 1, chatId),
       ].join("\n");
       await smartMoneyNotifier(chatId, message);
+    }
+  }
+}
+
+async function notifyAlphaSmartMoneyCandidates(candidates: SmartMoneyCandidate[]) {
+  if (!alphaNotifier || !alphaChatIds.size) return;
+  for (const candidate of candidates) {
+    for (const chatId of alphaChatIds) {
+      const message = [
+        "🚀 НОВЫЙ СИГНАЛ · АЛЬФА SMART MONEY",
+        "",
+        await smartMoneyCandidateText(candidate, 1, chatId),
+      ].join("\n");
+      await alphaNotifier(chatId, message);
     }
   }
 }
