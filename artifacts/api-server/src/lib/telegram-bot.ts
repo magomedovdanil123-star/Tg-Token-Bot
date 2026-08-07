@@ -3735,36 +3735,58 @@ function isAlphaRequest(text: string) {
 // ── Early Movement (1H sweep-and-reversal) ────────────────────────────────────
 
 function movementCandidateText(c: EarlyMovementCandidate): string {
-  const dir     = c.direction === "BUY" ? "LONG ↑" : "SHORT ↓";
-  const setup   = c.direction === "BUY"
-    ? "Sweep минимума → возврат → higher low"
-    : "Sweep максимума → возврат → lower high";
-  const sweep   = c.direction === "BUY"
-    ? `Свип: ${formatNumber(c.sweepDepthPct, 2)}% ниже поддержки, bullish rejection`
-    : `Свип: ${formatNumber(c.sweepDepthPct, 2)}% выше сопротивления, bearish rejection`;
-  const breakLine = c.rangeBreakout
-    ? (c.direction === "BUY" ? "✅ Пробой диапазона вверх" : "✅ Пробой диапазона вниз")
-    : "⏳ Пробой диапазона ожидается";
-  const volLine = c.sweepVolumeRatio >= 1.3
-    ? `Объём свипа: ${formatNumber(c.sweepVolumeRatio, 2)}× среднего`
-    : `Объём свипа: ${formatNumber(c.sweepVolumeRatio, 2)}×`;
-  const obLine  = c.marketOpen && c.orderBookImbalance !== null
-    ? `Стакан: бид ${formatNumber(c.orderBookImbalance * 100, 0)}% (${c.direction === "BUY" ? "↑ покупатели" : "↓ продавцы"})`
-    : "Стакан: рынок закрыт";
-  const imoexLine = `IMOEX 3h: ${c.imoexTrendPct >= 0 ? "+" : ""}${formatNumber(c.imoexTrendPct, 2)}%`;
+  const isLong = c.direction === "BUY";
+  const emoji  = isLong ? "🚀" : "🔻";
+  const dirRu  = isLong ? "ВВЕРХ" : "ВНИЗ";
+
+  // ── Что произошло (объём + свип) ──────────────────────────────────────────
+  const volDesc = c.sweepVolumeRatio >= 2.5
+    ? `взрывной объём ${formatNumber(c.sweepVolumeRatio, 1)}× среднего`
+    : c.sweepVolumeRatio >= 1.5
+    ? `повышенный объём ${formatNumber(c.sweepVolumeRatio, 1)}× среднего`
+    : `объём ${formatNumber(c.sweepVolumeRatio, 1)}× среднего`;
+
+  const growthDesc = c.volumeEscalation >= 3
+    ? `${c.volumeEscalation} часа объём нарастал`
+    : `${c.volumeEscalation} часа нарастание объёма`;
+
+  const sweepDesc = isLong
+    ? `пробил поддержку на ${formatNumber(c.sweepDepthPct, 2)}% вниз и тут же вернулся — скупка под уровнем`
+    : `пробил сопротивление на ${formatNumber(c.sweepDepthPct, 2)}% вверх и тут же вернулся — продажа на уровне`;
+
+  // ── IMOEX контекст ────────────────────────────────────────────────────────
+  const imoexLine = c.imoexFilter === "diverge"
+    ? `⚡ Аномалия: ${c.imoexRelation}`
+    : c.imoexFilter === "aligned"
+    ? `📈 ${c.imoexRelation}`
+    : `📊 ${c.imoexRelation}`;
+
+  // ── Стакан ────────────────────────────────────────────────────────────────
+  const obLine = c.marketOpen && c.orderBookImbalance !== null
+    ? `Стакан: бид ${formatNumber(c.orderBookImbalance * 100, 0)}% (${isLong ? "покупатели давят" : "продавцы давят"})`
+    : "Стакан: рынок закрыт, данных нет";
+
+  // ── Качество сигнала ──────────────────────────────────────────────────────
+  const qualityStars = "⭐".repeat(Math.min(c.score, 5));
+  const evLine = c.backtestEV > 0
+    ? `Бэктест: WR ~${c.backtestWR}%, ожидание +${formatNumber(c.backtestEV, 2)}%/сд`
+    : "Бэктест: нет данных";
+
+  // ── Сборка ────────────────────────────────────────────────────────────────
   return [
-    `📡 ${dir} · ${c.ticker}`,
-    `Сетап: ${setup}`,
-    sweep,
-    breakLine,
-    volLine,
-    obLine,
+    `${emoji} ИМПУЛЬС ${dirRu} · ${c.ticker}`,
+    "",
+    `Что произошло: ${growthDesc}, затем ${sweepDesc}`,
     imoexLine,
-    `Оценка: ${c.score}/5`,
-    `Вход: ${formatNumber(c.entryPrice)}`,
-    `Take: ${formatNumber(c.takeProfit)} (+${c.targetPct}%)`,
-    `Stop: ${formatNumber(c.stopLoss)} (−${c.stopPct}%)`,
-    "Режим: PAPER TRADING",
+    obLine,
+    "",
+    `Вход сейчас: ${formatNumber(c.entryPrice)} руб`,
+    `Цель:  ${formatNumber(c.takeProfit)} руб (+${c.targetPct}%)`,
+    `Стоп:  ${formatNumber(c.stopLoss)} руб (−${c.stopPct}%)`,
+    "",
+    `Сила сигнала: ${qualityStars} (${c.score}/5)`,
+    evLine,
+    "PAPER TRADING",
   ].join("\n");
 }
 
@@ -3782,20 +3804,19 @@ async function recordMovementCandidates(candidates: EarlyMovementCandidate[]) {
       LIMIT 1
     `);
     if (existing.rows.length) { duplicates++; continue; }
-    const entry = c.entryPrice;
     const result = await recordPaperSignal({
       ticker: c.ticker,
-      featureTimestamp: c.confirmBar.timestamp,
+      featureTimestamp: c.sweepBar.timestamp,
       direction,
       confidence: c.score * 20,
-      entryPrice: entry,
+      entryPrice: c.entryPrice,
       stopPrice: c.stopLoss,
       targetPrice: c.takeProfit,
       horizonMinutes: PAPER_HORIZON_MINUTES,
       reasons: [
-        `1H sweep-and-reversal (score ${c.score}/5)`,
-        `Sweep depth ${formatNumber(c.sweepDepthPct, 2)}%`,
-        `Volume ratio ${formatNumber(c.sweepVolumeRatio, 2)}×`,
+        `Spring impulse 1H (score ${c.score}/5)`,
+        `Volume escalation ${c.volumeEscalation}h, ratio ${formatNumber(c.sweepVolumeRatio, 2)}×`,
+        `Sweep depth ${formatNumber(c.sweepDepthPct, 2)}%, IMOEX filter: ${c.imoexFilter}`,
       ],
       patternIds: [],
       combinationIds: [],
@@ -3804,17 +3825,18 @@ async function recordMovementCandidates(candidates: EarlyMovementCandidate[]) {
       metadata: {
         source: "movement",
         paperTrading: true,
-        setup: "sweep_reversal_1h",
+        setup: "spring_impulse_1h",
         direction: c.direction,
         sweepBarTimestamp: c.sweepBar.timestamp.toISOString(),
-        confirmBarTimestamp: c.confirmBar.timestamp.toISOString(),
         sweepDepthPct: c.sweepDepthPct,
         sweepVolumeRatio: c.sweepVolumeRatio,
-        rangeBreakout: c.rangeBreakout,
+        volumeEscalation: c.volumeEscalation,
         imoexTrendPct: c.imoexTrendPct,
+        imoexFilter: c.imoexFilter,
         orderBookImbalance: c.orderBookImbalance,
         marketOpen: c.marketOpen,
         score: c.score,
+        backtestEV: c.backtestEV,
       },
     });
     if (result === "recorded") { recorded.push(c); }
@@ -3826,9 +3848,9 @@ async function recordMovementCandidates(candidates: EarlyMovementCandidate[]) {
 async function notifyMovementCandidates(candidates: EarlyMovementCandidate[]) {
   if (!movementNotifier || !movementChatIds.size) return;
   for (const c of candidates) {
-    const message = ["📡 НОВЫЙ СИГНАЛ · ДВИЖЕНИЕ 1H", "", movementCandidateText(c)].join("\n");
+    // Notify each subscriber with the full plain-language signal description
     for (const chatId of movementChatIds) {
-      await movementNotifier(chatId, message);
+      await movementNotifier(chatId, movementCandidateText(c));
     }
   }
 }
@@ -3843,15 +3865,14 @@ async function movementText(chatId?: number): Promise<TelegramMessage> {
     const blocks = scan.candidates.map(movementCandidateText);
     return {
       text: [
-        "📡 ДВИЖЕНИЕ 1H · SWEEP-AND-REVERSAL",
+        "📡 СИГНАЛЫ ИМПУЛЬСА · 77 АКЦИЙ MOEX",
         "",
-        `Проверено акций: ${scan.analyzedTickers} · обновлено: ${formatDate(scan.generatedAt)}`,
-        "Обновление каждые 2 минуты. Стакан — только в торговые часы.",
+        `Проверено: ${scan.analyzedTickers} акций · ${formatDate(scan.generatedAt)}`,
+        "Обновление каждые 2 мин. Подписка включена — уведомления приходят автоматически.",
         "",
         ...(blocks.length
-          ? blocks.flatMap((b) => [b, ""])
-          : ["Сигналов нет — ожидаем свипы с разворотами.", ""]),
-        `Новых: ${records.recorded.length} · повторов: ${records.duplicates}`,
+          ? blocks.flatMap((b) => [b, "─────────────────────", ""])
+          : ["Сигналов сейчас нет. Объём нарастает — жду пружину.", ""]),
         "PAPER TRADING — реальные сделки не совершаются.",
       ].join("\n"),
       replyMarkup: TELEGRAM_MENU,
@@ -3860,7 +3881,7 @@ async function movementText(chatId?: number): Promise<TelegramMessage> {
     logger.warn({ err: error }, "Movement scan failed");
     return {
       text: [
-        "📡 ДВИЖЕНИЕ 1H · SWEEP-AND-REVERSAL",
+        "📡 СИГНАЛЫ ИМПУЛЬСА",
         "",
         "Не удалось завершить скан. Попробуйте позже.",
       ].join("\n"),
