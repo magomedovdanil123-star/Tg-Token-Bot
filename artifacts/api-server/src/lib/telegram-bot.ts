@@ -19,6 +19,7 @@ import {
   telegramAlphaSubscriptions,
   telegramCommoditySubscriptions,
   telegramMoneyTestSubscriptions,
+  telegramMovementSubscriptions,
   telegramPositionSettings,
   telegramSmartMoneySubscriptions,
 } from "@workspace/db";
@@ -46,6 +47,10 @@ import {
   scanAlphaStrategy,
   type AlphaRetestCandidate,
 } from "./alpha-scanner";
+import {
+  scanEarlyMovement,
+  type EarlyMovementCandidate,
+} from "./early-movement-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TIMEFRAME = "10m";
@@ -63,6 +68,7 @@ const COMMODITIES_BUTTON = "🪙 Сырьё и металлы";
 const MONEY_TEST_BUTTON = "💵 Деньги тест";
 const REPLIT_BUTTON = "🧠 Replit";
 const ALPHA_BUTTON  = "🚀 Альфа";
+const MOVEMENT_BUTTON = "📡 Движение 1H";
 const COMPANY_ANALYSIS_BUTTON = "🔎 Аналитика компании";
 const AVERAGING_BUTTON = "📐 Усреднение / банк";
 const SIGNAL_MAX_AGE_MINUTES = 30;
@@ -77,6 +83,7 @@ const COMMODITY_SCAN_INTERVAL_MS = 3 * 60 * 1000;
 const MONEY_TEST_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const REPLIT_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const ALPHA_SCAN_INTERVAL_MS  = 2 * 60 * 1000;
+const MOVEMENT_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const WAVE_SCAN_INTERVAL_MS = 30 * 60 * 1000;
 const PAPER_COMMISSION_ONE_WAY_PERCENT = 0.05;
 const PAPER_SLIPPAGE_ONE_WAY_PERCENT = 0.05;
@@ -108,6 +115,7 @@ const TELEGRAM_MENU = {
   keyboard: [
     [SMART_MONEY_BUTTON],
     [ALPHA_BUTTON],
+    [MOVEMENT_BUTTON],
     [COMMODITIES_BUTTON],
     [MONEY_TEST_BUTTON],
     [REPLIT_BUTTON],
@@ -144,6 +152,9 @@ let replitScanRunning = false;
 let alphaNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
 const alphaChatIds = new Set<number>();
 let alphaScanRunning = false;
+let movementNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
+const movementChatIds = new Set<number>();
+let movementScanRunning = false;
 const pendingBankChats = new Set<number>();
 
 async function ensureTelegramSubscriptionTables() {
@@ -161,6 +172,12 @@ async function ensureTelegramSubscriptionTables() {
   `);
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS telegram_alpha_subscriptions (
+      chat_id bigint PRIMARY KEY,
+      subscribed_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS telegram_movement_subscriptions (
       chat_id bigint PRIMARY KEY,
       subscribed_at timestamptz NOT NULL DEFAULT now()
     )
@@ -270,6 +287,27 @@ async function subscribeAlphaChat(chatId: number) {
   alphaChatIds.add(chatId);
   await db
     .insert(telegramAlphaSubscriptions)
+    .values({ chatId })
+    .onConflictDoNothing();
+}
+
+async function loadMovementSubscriptions() {
+  const subscriptions = await db
+    .select({ chatId: telegramMovementSubscriptions.chatId })
+    .from(telegramMovementSubscriptions);
+  for (const subscription of subscriptions) {
+    if (Number.isSafeInteger(subscription.chatId)) {
+      movementChatIds.add(subscription.chatId);
+    }
+  }
+  logger.info({ count: movementChatIds.size }, "Movement Telegram subscriptions loaded");
+}
+
+async function subscribeMovementChat(chatId: number) {
+  if (!Number.isSafeInteger(chatId)) return;
+  movementChatIds.add(chatId);
+  await db
+    .insert(telegramMovementSubscriptions)
     .values({ chatId })
     .onConflictDoNothing();
 }
@@ -793,7 +831,8 @@ async function recordPaperSignal(input: {
     | "commodity-smartmoney"
     | "money-test"
     | "replit"
-    | "alpha";
+    | "alpha"
+    | "movement";
   timeframe?: string;
   metadata?: Record<string, unknown>;
   bypassRiskLimits?: boolean;
@@ -2842,6 +2881,7 @@ function helpText() {
     `«${COMMODITIES_BUTTON}» — анализировать золото, серебро и Brent.`,
     `«${MONEY_TEST_BUTTON}» — экспериментальный intraday-анализ с дополнительными фильтрами.`,
     `«${ALPHA_BUTTON}» — комбинированная стратегия: Alpha Retest + Smart Money IMOEX.`,
+    `«${MOVEMENT_BUTTON}» — ранний детектор движения 1H: sweep-and-reversal по всем 70+ акциям + стакан T-Invest.`,
     `«${REPLIT_BUTTON}» — независимые сигналы личной стратегии Replit.`,
     `«${COMPANY_ANALYSIS_BUTTON}» — выполнить Smart Money-анализ выбранной компании.`,
     "",
@@ -2849,6 +2889,7 @@ function helpText() {
     "/bank — установить или изменить банк для расчёта усреднения.",
     "/smartmoney — подтверждённые Smart Money SMC-сетапы.",
     "/alpha — комбинированная стратегия Alpha Retest + Smart Money.",
+    "/movement — ранний детектор движения 1H (sweep-and-reversal + стакан).",
     "/commodities — Smart Money-анализ золота, серебра и Brent.",
     "/moneytest — экспериментальный intraday-анализ с дополнительными фильтрами.",
     "/replit — независимый сигнал личной стратегии Replit.",
@@ -3688,6 +3729,176 @@ function isAlphaRequest(text: string) {
     normalizedText === "альфа" ||
     normalizedText === "alpha" ||
     normalizedText === "/alpha"
+  );
+}
+
+// ── Early Movement (1H sweep-and-reversal) ────────────────────────────────────
+
+function movementCandidateText(c: EarlyMovementCandidate): string {
+  const dir     = c.direction === "BUY" ? "LONG ↑" : "SHORT ↓";
+  const setup   = c.direction === "BUY"
+    ? "Sweep минимума → возврат → higher low"
+    : "Sweep максимума → возврат → lower high";
+  const sweep   = c.direction === "BUY"
+    ? `Свип: ${formatNumber(c.sweepDepthPct, 2)}% ниже поддержки, bullish rejection`
+    : `Свип: ${formatNumber(c.sweepDepthPct, 2)}% выше сопротивления, bearish rejection`;
+  const breakLine = c.rangeBreakout
+    ? (c.direction === "BUY" ? "✅ Пробой диапазона вверх" : "✅ Пробой диапазона вниз")
+    : "⏳ Пробой диапазона ожидается";
+  const volLine = c.sweepVolumeRatio >= 1.3
+    ? `Объём свипа: ${formatNumber(c.sweepVolumeRatio, 2)}× среднего`
+    : `Объём свипа: ${formatNumber(c.sweepVolumeRatio, 2)}×`;
+  const obLine  = c.marketOpen && c.orderBookImbalance !== null
+    ? `Стакан: бид ${formatNumber(c.orderBookImbalance * 100, 0)}% (${c.direction === "BUY" ? "↑ покупатели" : "↓ продавцы"})`
+    : "Стакан: рынок закрыт";
+  const imoexLine = `IMOEX 3h: ${c.imoexTrendPct >= 0 ? "+" : ""}${formatNumber(c.imoexTrendPct, 2)}%`;
+  return [
+    `📡 ${dir} · ${c.ticker}`,
+    `Сетап: ${setup}`,
+    sweep,
+    breakLine,
+    volLine,
+    obLine,
+    imoexLine,
+    `Оценка: ${c.score}/5`,
+    `Вход: ${formatNumber(c.entryPrice)}`,
+    `Take: ${formatNumber(c.takeProfit)} (+${c.targetPct}%)`,
+    `Stop: ${formatNumber(c.stopLoss)} (−${c.stopPct}%)`,
+    "Режим: PAPER TRADING",
+  ].join("\n");
+}
+
+async function recordMovementCandidates(candidates: EarlyMovementCandidate[]) {
+  const recorded: EarlyMovementCandidate[] = [];
+  let duplicates = 0;
+  for (const c of candidates) {
+    const direction = c.direction === "BUY" ? "BUY" : "SELL";
+    const existing = await db.execute(sql`
+      SELECT id FROM signals_history
+      WHERE ticker = ${c.ticker}
+        AND direction = ${direction}
+        AND metadata ->> 'source' = 'movement'
+        AND metadata ->> 'sweepBarTimestamp' = ${c.sweepBar.timestamp.toISOString()}
+      LIMIT 1
+    `);
+    if (existing.rows.length) { duplicates++; continue; }
+    const entry = c.entryPrice;
+    const result = await recordPaperSignal({
+      ticker: c.ticker,
+      featureTimestamp: c.confirmBar.timestamp,
+      direction,
+      confidence: c.score * 20,
+      entryPrice: entry,
+      stopPrice: c.stopLoss,
+      targetPrice: c.takeProfit,
+      horizonMinutes: PAPER_HORIZON_MINUTES,
+      reasons: [
+        `1H sweep-and-reversal (score ${c.score}/5)`,
+        `Sweep depth ${formatNumber(c.sweepDepthPct, 2)}%`,
+        `Volume ratio ${formatNumber(c.sweepVolumeRatio, 2)}×`,
+      ],
+      patternIds: [],
+      combinationIds: [],
+      source: "movement",
+      timeframe: "1h",
+      metadata: {
+        source: "movement",
+        paperTrading: true,
+        setup: "sweep_reversal_1h",
+        direction: c.direction,
+        sweepBarTimestamp: c.sweepBar.timestamp.toISOString(),
+        confirmBarTimestamp: c.confirmBar.timestamp.toISOString(),
+        sweepDepthPct: c.sweepDepthPct,
+        sweepVolumeRatio: c.sweepVolumeRatio,
+        rangeBreakout: c.rangeBreakout,
+        imoexTrendPct: c.imoexTrendPct,
+        orderBookImbalance: c.orderBookImbalance,
+        marketOpen: c.marketOpen,
+        score: c.score,
+      },
+    });
+    if (result === "recorded") { recorded.push(c); }
+    else if (result === "duplicate") { duplicates++; }
+  }
+  return { recorded, duplicates };
+}
+
+async function notifyMovementCandidates(candidates: EarlyMovementCandidate[]) {
+  if (!movementNotifier || !movementChatIds.size) return;
+  for (const c of candidates) {
+    const message = ["📡 НОВЫЙ СИГНАЛ · ДВИЖЕНИЕ 1H", "", movementCandidateText(c)].join("\n");
+    for (const chatId of movementChatIds) {
+      await movementNotifier(chatId, message);
+    }
+  }
+}
+
+async function movementText(chatId?: number): Promise<TelegramMessage> {
+  if (chatId !== undefined) await subscribeMovementChat(chatId);
+  try {
+    const scan = await scanEarlyMovement();
+    const records = await recordMovementCandidates(scan.candidates);
+    await notifyMovementCandidates(records.recorded);
+
+    const blocks = scan.candidates.map(movementCandidateText);
+    return {
+      text: [
+        "📡 ДВИЖЕНИЕ 1H · SWEEP-AND-REVERSAL",
+        "",
+        `Проверено акций: ${scan.analyzedTickers} · обновлено: ${formatDate(scan.generatedAt)}`,
+        "Обновление каждые 2 минуты. Стакан — только в торговые часы.",
+        "",
+        ...(blocks.length
+          ? blocks.flatMap((b) => [b, ""])
+          : ["Сигналов нет — ожидаем свипы с разворотами.", ""]),
+        `Новых: ${records.recorded.length} · повторов: ${records.duplicates}`,
+        "PAPER TRADING — реальные сделки не совершаются.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  } catch (error) {
+    logger.warn({ err: error }, "Movement scan failed");
+    return {
+      text: [
+        "📡 ДВИЖЕНИЕ 1H · SWEEP-AND-REVERSAL",
+        "",
+        "Не удалось завершить скан. Попробуйте позже.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  }
+}
+
+async function runMovementScanCycle() {
+  if (movementScanRunning) return;
+  movementScanRunning = true;
+  try {
+    const scan = await scanEarlyMovement();
+    const records = await recordMovementCandidates(scan.candidates);
+    await notifyMovementCandidates(records.recorded);
+    logger.info(
+      {
+        analyzed: scan.analyzedTickers,
+        candidates: scan.candidates.length,
+        recorded: records.recorded.length,
+      },
+      "Movement scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Movement scan cycle skipped");
+  } finally {
+    movementScanRunning = false;
+  }
+}
+
+function isMovementRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === MOVEMENT_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "движение" ||
+    normalizedText === "движение 1h" ||
+    normalizedText === "/movement" ||
+    normalizedText === "/move"
   );
 }
 
@@ -6208,6 +6419,9 @@ async function handleMessage(chatId: number, text: string) {
   if (isAlphaRequest(text)) {
     return alphaText(chatId);
   }
+  if (isMovementRequest(text)) {
+    return movementText(chatId);
+  }
   if (isReplitRequest(text)) {
     return replitText(chatId);
   }
@@ -6344,6 +6558,7 @@ export function startTelegramBot() {
   moneyTestNotifier = client.sendMessage;
   replitNotifier = client.sendMessage;
   alphaNotifier = client.sendMessage;
+  movementNotifier = client.sendMessage;
   const intradayScanTimer = setInterval(() => {
     void runIntradayScanCycle();
   }, INTRADAY_SCAN_INTERVAL_MS);
@@ -6365,6 +6580,9 @@ export function startTelegramBot() {
   const alphaScanTimer = setInterval(() => {
     void runAlphaScanCycle();
   }, ALPHA_SCAN_INTERVAL_MS);
+  const movementScanTimer = setInterval(() => {
+    void runMovementScanCycle();
+  }, MOVEMENT_SCAN_INTERVAL_MS);
   const paperEvaluationTimer = setInterval(() => {
     if (paperEvaluationRunning) return;
     paperEvaluationRunning = true;
@@ -6398,6 +6616,7 @@ export function startTelegramBot() {
     clearInterval(moneyTestScanTimer);
     clearInterval(replitScanTimer);
     clearInterval(alphaScanTimer);
+    clearInterval(movementScanTimer);
     clearInterval(paperEvaluationTimer);
     clearInterval(learningEvaluationTimer);
     smartMoneyNotifier = null;
@@ -6405,6 +6624,7 @@ export function startTelegramBot() {
     moneyTestNotifier = null;
     replitNotifier = null;
     alphaNotifier = null;
+    movementNotifier = null;
   };
 
   void (async () => {
@@ -6417,6 +6637,7 @@ export function startTelegramBot() {
       await loadMoneyTestSubscriptions();
       await loadReplitSubscriptions();
       await loadAlphaSubscriptions();
+      await loadMovementSubscriptions();
       await client.setMyCommands(
         JSON.stringify([
           { command: "analysis", description: "Smart Money по выбранной акции" },
@@ -6428,6 +6649,7 @@ export function startTelegramBot() {
           { command: "commodities", description: "Золото, серебро и Brent · Smart Money" },
           { command: "moneytest", description: "Экспериментальный intraday Smart Money" },
           { command: "alpha", description: "Комбинированная стратегия Alpha Retest + Smart Money" },
+          { command: "movement", description: "Ранний детектор движения 1H: sweep-and-reversal + стакан" },
           { command: "replit", description: "Независимая стратегия Replit" },
           { command: "bank", description: "Установить или изменить банк усреднения" },
           { command: "waves", description: "Волны Эллиотта и Fibonacci" },
@@ -6446,6 +6668,7 @@ export function startTelegramBot() {
       void runMoneyTestScanCycle();
       void runReplitScanCycle();
       void runAlphaScanCycle();
+      void runMovementScanCycle();
       void runWaveScanCycle();
       void evaluateLearningSignals().catch((error) => {
         logger.error({ err: error }, "Background signal learning evaluation failed");
