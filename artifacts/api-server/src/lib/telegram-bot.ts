@@ -3402,9 +3402,11 @@ async function moneyTestText(chatId?: number): Promise<TelegramMessage> {
 async function replitCandidateText(candidate: ReplitCandidate) {
   const direction = candidate.direction === "BUY" ? "Long" : "Short";
   return [
-    `MTS Experimental ${direction}`,
+    `MTS Retest ${direction}`,
     `${candidate.ticker}`,
-    "Сетап: 2 из 3 — объём 2× / momentum -0,3% / красная свеча",
+    "Сетап: 1H momentum + volume",
+    `Ретест: отклонение ${formatNumber(candidate.pullbackPercent, 2)}% против входа`,
+    `Подтверждение: 15m импульс · объём ${formatNumber(candidate.confirmationVolumeRatio, 2)}× среднего`,
     `Вход: ${formatNumber(candidate.entryPrice)}`,
     `Take: ${formatNumber(candidate.takeProfit)}`,
     `Stop: ${formatNumber(candidate.stopLoss)}`,
@@ -3447,11 +3449,17 @@ async function recordReplitCandidates(candidates: ReplitCandidate[]) {
       bypassRiskLimits: true,
       metadata: {
         strategy: "MTS",
-        setup: "momentum_volume_short_2_of_3",
+        setup: "momentum_volume_retest_reclaim",
         experimental: true,
         strategyTimeframe: "1h",
+        confirmationTimeframe: "15m",
         executionTimeframe: "1m",
         setupCandleTimestamp: candidate.candleTimestamp.toISOString(),
+        setupPrice: candidate.setupPrice,
+        confirmationTimestamp: candidate.confirmationTimestamp.toISOString(),
+        pullbackPercent: candidate.pullbackPercent,
+        confirmationVolumeRatio: candidate.confirmationVolumeRatio,
+        confirmationBodyRatio: candidate.confirmationBodyRatio,
         targetPercent: candidate.targetPercent,
         stopPercent: candidate.stopPercent,
         score: candidate.score,
