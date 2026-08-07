@@ -116,6 +116,9 @@ function parseCandle(row: Record<string, unknown>): Candle | null {
   return { timestamp: ts, open, high, low, close, volume };
 }
 
+// Non-MOEX instruments stored in the candles table — exclude from equity scan.
+const EXCLUDED_TICKERS = new Set(["IMOEX", "XAUUSD", "XAGUSD", "BRENT"]);
+
 async function loadHourlyCandles(
   now: Date,
 ): Promise<{ tickers: Map<string, Candle[]>; imoex: Candle[] }> {
@@ -127,9 +130,7 @@ async function loadHourlyCandles(
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS rn
       FROM candles
       WHERE timeframe = '1h'
-        AND ticker IN (
-          SELECT secid FROM moex_tickers WHERE is_active = true
-        )
+        AND ticker NOT IN ('XAUUSD', 'XAGUSD', 'BRENT')
     ) t WHERE rn <= ${HOUR_ROWS}
     ORDER BY ticker, timestamp
   `);
@@ -144,7 +145,7 @@ async function loadHourlyCandles(
     if (!ticker || !candle) continue;
     if (ticker === "IMOEX") {
       imoexArr.push(candle);
-    } else {
+    } else if (!EXCLUDED_TICKERS.has(ticker)) {
       const arr = tickers.get(ticker) ?? [];
       arr.push(candle);
       tickers.set(ticker, arr);
@@ -176,7 +177,7 @@ async function loadLatestPrices(
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS rn
       FROM candles
       WHERE timeframe = '1m'
-        AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true AND secid <> 'IMOEX')
+        AND ticker NOT IN ('IMOEX', 'XAUUSD', 'XAGUSD', 'BRENT')
     ) t WHERE rn = 1
   `);
   const prices = new Map<string, { price: number; timestamp: Date }>();
@@ -210,12 +211,7 @@ async function loadCooldownSet(now: Date): Promise<Set<string>> {
   return keys;
 }
 
-async function loadActiveTickers(): Promise<string[]> {
-  const result = await db.execute(sql`
-    SELECT secid FROM moex_tickers WHERE is_active = true AND secid <> 'IMOEX' ORDER BY secid
-  `);
-  return result.rows.map((r) => String((r as Record<string, unknown>).secid ?? "")).filter(Boolean);
-}
+// Derives the ticker list directly from the candle map — no separate DB query needed.
 
 // ── Detection logic ───────────────────────────────────────────────────────────
 
@@ -353,21 +349,22 @@ function detectCandidate(
 export async function scanEarlyMovement(): Promise<EarlyMovementScan> {
   const now = new Date();
 
-  const [{ tickers: hourlyMap, imoex }, cooldown, activeTickers] =
-    await Promise.all([
-      loadHourlyCandles(now),
-      loadCooldownSet(now),
-      loadActiveTickers(),
-    ]);
+  const [{ tickers: hourlyMap, imoex }, cooldown] = await Promise.all([
+    loadHourlyCandles(now),
+    loadCooldownSet(now),
+  ]);
+
+  // Derive ticker list from loaded candles — covers IMOEX + 2nd-tier + manual additions.
+  const activeTickers = [...hourlyMap.keys()].sort();
 
   // Prefetch FIGIs (no-op if cache is fresh)
   void prefetchFigis(activeTickers).catch(() => {});
 
-  // Fetch order books in parallel (all tickers at once, 8 concurrent)
-  const bookMap = await getOrderBooks(activeTickers).catch(() => new Map<string, OrderBook>());
-
-  // Load latest 1m prices
-  const latestPrices = await loadLatestPrices(now).catch(() => new Map<string, { price: number; timestamp: Date }>());
+  // Fetch order books and latest prices in parallel
+  const [bookMap, latestPrices] = await Promise.all([
+    getOrderBooks(activeTickers).catch(() => new Map<string, OrderBook>()),
+    loadLatestPrices(now).catch(() => new Map<string, { price: number; timestamp: Date }>()),
+  ]);
 
   const imoexPct = imoexTrend(imoex);
 
