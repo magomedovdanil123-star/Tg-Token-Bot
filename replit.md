@@ -49,8 +49,10 @@ Stores MOEX market candles, technical indicators, market context, and research r
 ## Product
 
 - PostgreSQL storage for the current official IMOEX constituent list and 10-minute candles.
+- Bybit USDT-perpetual candles for up to 30 assets from the user-provided CoinMarketCap capitalization list; stablecoins are excluded.
 - Derived trend, momentum, volatility, candle, volume, Bollinger, MACD, RSI, ATR, VWAP, OBV, MFI, CCI, and Williams %R features.
 - Separate market context, macro, pattern, signal, strategy, and backtest tables for the research engine.
+- Telegram `/crypto` runs the same strict Smart Money filters on Bybit market data and stores paper signals only; it never places real orders.
 
 ## User preferences
 

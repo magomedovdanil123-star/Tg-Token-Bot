@@ -60,10 +60,11 @@ export const candles = pgTable(
     source: varchar("source", { length: 32 }).notNull().default("moex_iss"),
   },
   (table) => [
-    uniqueIndex("candles_ticker_timeframe_timestamp_uq").on(
+    uniqueIndex("candles_ticker_timeframe_timestamp_source_uq").on(
       table.ticker,
       table.timeframe,
       table.timestamp,
+      table.source,
     ),
     index("candles_ticker_timestamp_idx").on(table.ticker, table.timestamp),
   ],
@@ -618,6 +619,19 @@ export const telegramCommoditySubscriptions = pgTable(
   },
 );
 
+export const telegramCryptoSubscriptions = pgTable(
+  "telegram_crypto_subscriptions",
+  {
+    chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
+    subscribedAt: timestamp("subscribed_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
 export const telegramMoneyTestSubscriptions = pgTable(
   "telegram_money_test_subscriptions",
   {
@@ -806,6 +820,8 @@ export type FeatureCombination = typeof featureCombinations.$inferSelect;
 export type SignalHistory = typeof signalsHistory.$inferSelect;
 export type TelegramCommoditySubscription =
   typeof telegramCommoditySubscriptions.$inferSelect;
+export type TelegramCryptoSubscription =
+  typeof telegramCryptoSubscriptions.$inferSelect;
 export type TelegramMoneyTestSubscription =
   typeof telegramMoneyTestSubscriptions.$inferSelect;
 export type TelegramPositionSetting = typeof telegramPositionSettings.$inferSelect;

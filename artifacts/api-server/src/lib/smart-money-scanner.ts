@@ -1,4 +1,4 @@
-import { desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   db,
   moexTickers,
@@ -45,10 +45,15 @@ const SMART_MONEY_1M_MAX_AGE_MS = 15 * 60 * 1000;
 const SMART_MONEY_1H_MAX_AGE_MS = 90 * 60 * 1000;
 export const COMMODITY_TICKERS = ["XAUUSD", "XAGUSD", "BRENT"] as const;
 export const MONEY_TEST_TICKERS = SMART_MONEY_TICKERS;
-export type SmartMoneyUniverse = "imoex" | "commodities" | "money-test";
+export type SmartMoneyUniverse =
+  | "imoex"
+  | "commodities"
+  | "crypto"
+  | "money-test";
 export type SmartMoneySource =
   | "smartmoney"
   | "commodity-smartmoney"
+  | "crypto-smartmoney"
   | "money-test";
 type SmartMoneyFilterStats = Record<
   | "cooldown"
@@ -510,6 +515,16 @@ export async function scanSmartMoney(
         ? requestedTicker
           ? inArray(moexTickers.secid, [requestedTicker])
           : inArray(moexTickers.secid, [...COMMODITY_TICKERS])
+        : universe === "crypto"
+          ? requestedTicker
+            ? and(
+                eq(moexTickers.boardId, "BYBIT"),
+                eq(moexTickers.secid, requestedTicker),
+              )
+            : and(
+                eq(moexTickers.boardId, "BYBIT"),
+                eq(moexTickers.isActive, true),
+              )
         : universe === "money-test"
           ? requestedTicker
             ? inArray(moexTickers.secid, [requestedTicker])
@@ -534,11 +549,15 @@ export async function scanSmartMoney(
       ? activeTickers.filter((ticker) =>
           COMMODITY_TICKERS.includes(ticker as (typeof COMMODITY_TICKERS)[number]),
         )
+      : universe === "crypto"
+        ? activeTickers
       : universe === "money-test"
         ? activeTickers
         : requestedTicker
           ? activeTickers.filter((ticker) => ticker === requestedTicker)
           : activeTickers;
+  const candleSourceFilter =
+    universe === "crypto" ? sql`AND source = 'bybit'` : sql``;
   const result = await db.execute(sql`
     SELECT ticker, timeframe, timestamp, open, high, low, close, volume
     FROM (
@@ -546,39 +565,50 @@ export async function scanSmartMoney(
         ROW_NUMBER() OVER (PARTITION BY ticker, timeframe ORDER BY timestamp DESC) AS row_number
       FROM candles
       WHERE timeframe IN ('1m', '1h')
+        ${candleSourceFilter}
     ) latest
     WHERE row_number <= 2880
     ORDER BY ticker, timeframe, timestamp
   `);
   const rows = rowsFromResult(result);
   const latestByTickerTimeframe = new Map<string, Date>();
+  const latestClosedByTickerTimeframe = new Map<string, Date>();
   for (const row of rows) {
     const key = `${row.ticker}:${row.timeframe}`;
     const previous = latestByTickerTimeframe.get(key);
     if (!previous || row.timestamp > previous) {
       latestByTickerTimeframe.set(key, row.timestamp);
     }
+    const durationMs = row.timeframe === "1m" ? 60_000 : 60 * 60_000;
+    if (row.timestamp.getTime() + durationMs <= generatedAt.getTime()) {
+      const previousClosed = latestClosedByTickerTimeframe.get(key);
+      if (!previousClosed || row.timestamp > previousClosed) {
+        latestClosedByTickerTimeframe.set(key, row.timestamp);
+      }
+    }
   }
   const freshnessReason = (ticker: string, timeframe: "1m" | "1h") => {
-    const latest = latestByTickerTimeframe.get(`${ticker}:${timeframe}`);
+    const key = `${ticker}:${timeframe}`;
+    const latest = latestClosedByTickerTimeframe.get(key);
+    const latestRaw = latestByTickerTimeframe.get(key);
     const maxAgeMs =
       timeframe === "1m" ? SMART_MONEY_1M_MAX_AGE_MS : SMART_MONEY_1H_MAX_AGE_MS;
-    if (!latest) return `${ticker}: отсутствуют свечи ${timeframe}.`;
-    // MOEX timestamps identify the start of a candle. Compare freshness with
-    // the candle's close, otherwise every closed 1h candle looks one hour older
-    // than it really is.
+    if (!latest) {
+      return latestRaw
+        ? `${ticker}: отсутствуют закрытые свечи ${timeframe}.`
+        : `${ticker}: отсутствуют свечи ${timeframe}.`;
+    }
+    // Timestamps identify the start of an interval. Freshness is measured
+    // from its close; open intervals are never used as freshness evidence.
     const candleDurationMs = timeframe === "1m" ? 60_000 : 60 * 60_000;
     const ageMs = generatedAt.getTime() - (latest.getTime() + candleDurationMs);
-    if (!Number.isFinite(ageMs) || ageMs < -5 * 60 * 1000) {
-      return `${ticker}: свеча ${timeframe} имеет время из будущего: ${latest.toISOString()}.`;
-    }
     if (ageMs > maxAgeMs) {
       return `${ticker}: свеча ${timeframe} устарела на ${Math.max(0, ageMs / 60_000).toFixed(0)} мин. Последняя: ${latest.toISOString()}.`;
     }
     return null;
   };
   const marketFreshnessReasons =
-    universe === "commodities"
+    universe === "commodities" || universe === "crypto"
       ? []
       : (["1m", "1h"] as const)
           .map((timeframe) => freshnessReason("IMOEX", timeframe))
@@ -631,6 +661,10 @@ export async function scanSmartMoney(
     const tickerFreshnessReasons =
       universe === "commodities"
         ? []
+        : universe === "crypto"
+          ? (["1m", "1h"] as const)
+              .map((timeframe) => freshnessReason(ticker, timeframe))
+              .filter((reason): reason is string => Boolean(reason))
         : (["1m", "1h"] as const)
             .map((timeframe) => freshnessReason(ticker, timeframe))
             .filter((reason): reason is string => Boolean(reason));
@@ -715,11 +749,12 @@ export async function scanSmartMoney(
     }
 
     const direction = levels.direction;
-    const currentMarketRegime = universe === "commodities"
-      ? getMarketRegime(oneHour)
-      : marketContextConfirmed
-        ? marketRegime
-        : "NEUTRAL";
+    const currentMarketRegime =
+      universe === "commodities" || universe === "crypto"
+        ? getMarketRegime(oneHour)
+        : marketContextConfirmed
+          ? marketRegime
+          : "NEUTRAL";
     const liquidity = liquiditySignals(primary, current, levels);
     const block = orderBlock(primary, direction, levels);
     const fvg = fairValueGap(primary, direction);

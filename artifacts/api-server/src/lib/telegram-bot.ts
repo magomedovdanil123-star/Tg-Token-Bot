@@ -18,6 +18,7 @@ import {
   SMART_MONEY_TICKERS,
   telegramAlphaSubscriptions,
   telegramCommoditySubscriptions,
+  telegramCryptoSubscriptions,
   telegramMoneyTestSubscriptions,
   telegramMovementSubscriptions,
   telegramPositionSettings,
@@ -48,6 +49,10 @@ import {
   type AlphaRetestCandidate,
 } from "./alpha-scanner";
 import {
+  latestBybitQuotes,
+  refreshBybitMarketData,
+} from "./bybit-market-data";
+import {
   scanEarlyMovement,
   type EarlyMovementCandidate,
 } from "./early-movement-scanner";
@@ -65,6 +70,7 @@ const WAVES_BUTTON = "🌊 Волновой анализ";
 const WAVE_STATS_BUTTON = "📒 Статистика волн";
 const SMART_MONEY_BUTTON = "💰 Smart Money";
 const COMMODITIES_BUTTON = "🪙 Сырьё и металлы";
+const CRYPTO_BUTTON = "₿ Crypto Smart Money";
 const MONEY_TEST_BUTTON = "💵 Деньги тест";
 const REPLIT_BUTTON = "🧠 Replit";
 const ALPHA_BUTTON  = "🚀 Альфа";
@@ -80,6 +86,7 @@ const LEARNING_EVALUATION_INTERVAL_MS = 2 * 60 * 1000;
 const INTRADAY_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const SMART_MONEY_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const COMMODITY_SCAN_INTERVAL_MS = 3 * 60 * 1000;
+const CRYPTO_SCAN_INTERVAL_MS = 3 * 60 * 1000;
 const MONEY_TEST_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const REPLIT_SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const ALPHA_SCAN_INTERVAL_MS  = 2 * 60 * 1000;
@@ -114,6 +121,7 @@ const RESEARCH_ENGINE_VERSION = "engine-1";
 const TELEGRAM_MENU = {
   keyboard: [
     [SMART_MONEY_BUTTON],
+    [CRYPTO_BUTTON],
     [ALPHA_BUTTON],
     [MOVEMENT_BUTTON],
     [COMMODITIES_BUTTON],
@@ -143,6 +151,10 @@ let commodityScanRunning = false;
 let latestCommodityRefresh: Promise<void> | null = null;
 let commodityNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
 const commodityChatIds = new Set<number>();
+let cryptoScanRunning = false;
+let latestCryptoRefresh: Promise<void> | null = null;
+let cryptoNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
+const cryptoChatIds = new Set<number>();
 let moneyTestScanRunning = false;
 let moneyTestNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
 const moneyTestChatIds = new Set<number>();
@@ -178,6 +190,12 @@ async function ensureTelegramSubscriptionTables() {
   `);
   await db.execute(sql`
     CREATE TABLE IF NOT EXISTS telegram_movement_subscriptions (
+      chat_id bigint PRIMARY KEY,
+      subscribed_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS telegram_crypto_subscriptions (
       chat_id bigint PRIMARY KEY,
       subscribed_at timestamptz NOT NULL DEFAULT now()
     )
@@ -222,6 +240,27 @@ async function subscribeCommodityChat(chatId: number) {
   commodityChatIds.add(chatId);
   await db
     .insert(telegramCommoditySubscriptions)
+    .values({ chatId })
+    .onConflictDoNothing();
+}
+
+async function loadCryptoSubscriptions() {
+  const subscriptions = await db
+    .select({ chatId: telegramCryptoSubscriptions.chatId })
+    .from(telegramCryptoSubscriptions);
+  for (const subscription of subscriptions) {
+    if (Number.isSafeInteger(subscription.chatId)) {
+      cryptoChatIds.add(subscription.chatId);
+    }
+  }
+  logger.info({ count: cryptoChatIds.size }, "Crypto Telegram subscriptions loaded");
+}
+
+async function subscribeCryptoChat(chatId: number) {
+  if (!Number.isSafeInteger(chatId)) return;
+  cryptoChatIds.add(chatId);
+  await db
+    .insert(telegramCryptoSubscriptions)
     .values({ chatId })
     .onConflictDoNothing();
 }
@@ -829,6 +868,7 @@ async function recordPaperSignal(input: {
     | "wave"
     | "smartmoney"
     | "commodity-smartmoney"
+    | "crypto-smartmoney"
     | "money-test"
     | "replit"
     | "alpha"
@@ -857,6 +897,7 @@ async function recordPaperSignal(input: {
   const riskScope =
     input.source === "smartmoney" ||
     input.source === "commodity-smartmoney" ||
+    input.source === "crypto-smartmoney" ||
     input.source === "money-test" ||
     input.source === "alpha"
       ? sql`AND metadata ->> 'source' = ${input.source}`
@@ -977,11 +1018,16 @@ async function evaluatePaperSignals() {
     }
 
     const deadline = new Date(candleTimestamp.getTime() + horizonMinutes * 60_000);
+    const candleSourceFilter =
+      metadata.source === "crypto-smartmoney" || metadata.exchange === "bybit"
+        ? sql`AND source = 'bybit'`
+        : sql``;
     const candlesResult = await db.execute(sql`
       SELECT timestamp, high, low, close
       FROM candles
       WHERE ticker = ${ticker}
         AND timeframe = ${candleTimeframe}
+        ${candleSourceFilter}
         AND timestamp > ${candleTimestamp}
         AND timestamp <= ${deadline}
       ORDER BY timestamp
@@ -1043,7 +1089,7 @@ async function evaluatePaperSignals() {
       outcome === null &&
       lastClose !== null &&
       lastTimestamp !== null &&
-      lastTimestamp.getTime() >= deadline.getTime()
+      Date.now() >= deadline.getTime()
     ) {
       grossOutcomePercent =
         direction === "BUY"
@@ -1150,11 +1196,16 @@ async function evaluateLearningSignals() {
         ? entryPrice * (1 - LEARNING_STOP_PERCENT / 100)
         : entryPrice * (1 + LEARNING_STOP_PERCENT / 100);
     const deadline = new Date(candleTimestamp.getTime() + horizonMinutes * 60_000);
+    const candleSourceFilter =
+      metadata.source === "crypto-smartmoney" || metadata.exchange === "bybit"
+        ? sql`AND source = 'bybit'`
+        : sql``;
     const candlesResult = await db.execute(sql`
       SELECT timestamp, high, low, close
       FROM candles
       WHERE ticker = ${ticker}
         AND timeframe = ${candleTimeframe}
+        ${candleSourceFilter}
         AND timestamp > ${candleTimestamp}
         AND timestamp <= ${deadline}
       ORDER BY timestamp
@@ -1229,7 +1280,7 @@ async function evaluateLearningSignals() {
       outcome === null &&
       lastClose !== null &&
       lastTimestamp !== null &&
-      lastTimestamp.getTime() >= deadline.getTime()
+      Date.now() >= deadline.getTime()
     ) {
       outcome = "timeout";
       outcomeAt = lastTimestamp;
@@ -2878,6 +2929,7 @@ function helpText() {
     "",
     "Функции:",
     `«${SMART_MONEY_BUTTON}» — найти подтверждённые Smart Money SMC-сетапы.`,
+    `«${CRYPTO_BUTTON}» — криптовалюты Bybit по той же логике Smart Money.`,
     `«${COMMODITIES_BUTTON}» — анализировать золото, серебро и Brent.`,
     `«${MONEY_TEST_BUTTON}» — экспериментальный intraday-анализ с дополнительными фильтрами.`,
     `«${ALPHA_BUTTON}» — комбинированная стратегия: Alpha Retest + Smart Money IMOEX.`,
@@ -2888,6 +2940,7 @@ function helpText() {
     "Также доступны команды:",
     "/bank — установить или изменить банк для расчёта усреднения.",
     "/smartmoney — подтверждённые Smart Money SMC-сетапы.",
+    "/crypto — криптовалюты Bybit · Smart Money.",
     "/alpha — комбинированная стратегия Alpha Retest + Smart Money.",
     "/movement — ранний детектор движения 1H (sweep-and-reversal + стакан).",
     "/commodities — Smart Money-анализ золота, серебра и Brent.",
@@ -2923,6 +2976,18 @@ function isSmartMoneyRequest(text: string) {
     normalizedText === "smart money" ||
     normalizedText === "смарт мани" ||
     normalizedText === "/smartmoney"
+  );
+}
+
+function isCryptoRequest(text: string) {
+  const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
+  return (
+    normalizedText === CRYPTO_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "crypto" ||
+    normalizedText === "крипта" ||
+    normalizedText === "криптовалюта" ||
+    normalizedText === "криптовалюты" ||
+    normalizedText === "/crypto"
   );
 }
 
@@ -3216,6 +3281,130 @@ async function latestCommodityQuotes() {
       };
     })
     .filter((row) => Number.isFinite(row.close) && Number.isFinite(row.timestamp.getTime()));
+}
+
+async function refreshCryptoData() {
+  if (latestCryptoRefresh) return latestCryptoRefresh;
+  latestCryptoRefresh = refreshBybitMarketData().finally(() => {
+    latestCryptoRefresh = null;
+  });
+  return latestCryptoRefresh;
+}
+
+async function recordCryptoCandidates(candidates: SmartMoneyCandidate[]) {
+  let recorded = 0;
+  let duplicates = 0;
+  let blocked = 0;
+  const recordedCandidates: SmartMoneyCandidate[] = [];
+  for (const candidate of candidates) {
+    const result = await recordPaperSignal({
+      ticker: candidate.ticker,
+      featureTimestamp: candidate.timestamp,
+      direction: candidate.direction,
+      confidence: candidate.score,
+      entryPrice: candidate.entryPrice,
+      stopPrice: candidate.stopPrice,
+      targetPrice: candidate.takeProfit2,
+      horizonMinutes: 360,
+      reasons: candidate.reasons,
+      patternIds: [],
+      combinationIds: [],
+      source: "crypto-smartmoney",
+      timeframe: "15m",
+      bypassRiskLimits: true,
+      metadata: {
+        smartMoney: true,
+        crypto: true,
+        exchange: "bybit",
+        timeframe: "15m",
+        setupTimeframe: "15m",
+        executionTimeframe: "1m",
+        strategy: "SMC-Accumulation-BOS-CHoCH-Bybit",
+        probability: candidate.probability,
+        adaptiveThreshold: candidate.threshold,
+        rewardRisk: candidate.rewardRisk,
+        netRewardRisk: candidate.netRewardRisk,
+        takeProfit1: candidate.takeProfit1,
+        takeProfit2: candidate.takeProfit2,
+        takeProfit3: candidate.takeProfit3,
+        accumulation: candidate.accumulation,
+        structure: candidate.structure,
+        liquidity: candidate.liquidity,
+        orderBlock: candidate.orderBlock,
+        fairValueGap: candidate.fairValueGap,
+        volumeConfirmed: candidate.volumeConfirmed,
+        retestConfirmed: candidate.retestConfirmed,
+        higherTimeframeAgreement: candidate.higherTimeframeAgreement,
+        marketRegime: candidate.marketRegime,
+        bosQuality: candidate.bosQuality,
+        impulseConfirmed: candidate.impulseConfirmed,
+        rangeToAtr: candidate.rangeToAtr,
+        chart: candidate.chart,
+      },
+    });
+    if (result === "recorded") {
+      recorded += 1;
+      recordedCandidates.push(candidate);
+    } else if (result === "duplicate") duplicates += 1;
+    else blocked += 1;
+  }
+  return { recorded, duplicates, blocked, recordedCandidates };
+}
+
+async function cryptoText(chatId?: number): Promise<TelegramMessage> {
+  if (chatId !== undefined) await subscribeCryptoChat(chatId);
+  try {
+    await refreshCryptoData();
+    const [scan, quotes] = await Promise.all([
+      scanSmartMoney(undefined, {
+        universe: "crypto",
+        source: "crypto-smartmoney",
+      }),
+      latestBybitQuotes(),
+    ]);
+    const records = await recordCryptoCandidates(scan.candidates);
+    const blocks = await Promise.all(
+      scan.candidates.map((candidate, index) =>
+        smartMoneyCandidateText(candidate, index + 1, chatId),
+      ),
+    );
+    return {
+      text: [
+        "₿ CRYPTO · BYBIT · SMART MONEY",
+        "",
+        "Котировки:",
+        ...(quotes.length
+          ? quotes.map(
+              (quote) =>
+                `${quote.ticker}: ${formatNumber(quote.close)} · ${formatDate(quote.timestamp)}`,
+            )
+          : ["Котировки пока недоступны."]),
+        "",
+        `Проверено пар: ${scan.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
+        `Адаптивный минимальный рейтинг: ${formatNumber(scan.threshold, 0)}/100`,
+        "Логика: та же Smart Money — накопление, BOS, CHoCH, ликвидность, Order Block, FVG, объём, HTF alignment и net R:R.",
+        `Новых paper-сигналов: ${records.recorded} · повторов: ${records.duplicates}`,
+        "",
+        ...(blocks.length
+          ? blocks.flatMap((block) => [block, ""])
+          : ["Свежих крипто-сетапов сейчас нет.", ""]),
+        "Мониторинг Bybit: обновление примерно каждые 3 минуты.",
+        "PAPER TRADING — реальные сделки не совершаются. Не финансовая рекомендация.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  } catch (error) {
+    logger.error({ err: error }, "Crypto Smart Money scan failed");
+    return {
+      text: [
+        "₿ CRYPTO · BYBIT · SMART MONEY",
+        "",
+        "Не удалось обновить свечи Bybit.",
+        "Сигналы не формирую, чтобы не использовать неполные или устаревшие данные.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
+  }
 }
 
 async function recordCommodityCandidates(candidates: SmartMoneyCandidate[]) {
@@ -4583,6 +4772,46 @@ async function runCommodityScanCycle() {
     logger.warn({ err: error }, "Commodity Smart Money scan cycle skipped");
   } finally {
     commodityScanRunning = false;
+  }
+}
+
+async function runCryptoScanCycle() {
+  if (cryptoScanRunning) return;
+  cryptoScanRunning = true;
+  try {
+    await refreshCryptoData();
+    const scan = await scanSmartMoney(undefined, {
+      universe: "crypto",
+      source: "crypto-smartmoney",
+    });
+    const records = await recordCryptoCandidates(scan.candidates);
+    if (cryptoNotifier && records.recordedCandidates.length) {
+      for (const candidate of records.recordedCandidates) {
+        for (const chatId of cryptoChatIds) {
+          await cryptoNotifier(
+            chatId,
+            [
+              "₿ НОВЫЙ СИГНАЛ · BYBIT CRYPTO SMART MONEY",
+              "",
+              await smartMoneyCandidateText(candidate, 1, chatId),
+            ].join("\n"),
+          );
+        }
+      }
+    }
+    logger.info(
+      {
+        analyzed: scan.analyzed,
+        candidates: scan.candidates.length,
+        recorded: records.recorded,
+        duplicates: records.duplicates,
+      },
+      "Bybit Crypto Smart Money scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Bybit Crypto Smart Money scan cycle skipped");
+  } finally {
+    cryptoScanRunning = false;
   }
 }
 
@@ -6431,6 +6660,9 @@ async function handleMessage(chatId: number, text: string) {
   if (isSmartMoneyRequest(text)) {
     return smartMoneyText(chatId);
   }
+  if (isCryptoRequest(text)) {
+    return cryptoText(chatId);
+  }
   if (isCommoditiesRequest(text)) {
     return commoditiesText(chatId);
   }
@@ -6576,6 +6808,7 @@ export function startTelegramBot() {
   const client = createTelegramClient(token);
   smartMoneyNotifier = client.sendMessage;
   commodityNotifier = client.sendMessage;
+  cryptoNotifier = client.sendMessage;
   moneyTestNotifier = client.sendMessage;
   replitNotifier = client.sendMessage;
   alphaNotifier = client.sendMessage;
@@ -6592,6 +6825,9 @@ export function startTelegramBot() {
   const commodityScanTimer = setInterval(() => {
     void runCommodityScanCycle();
   }, COMMODITY_SCAN_INTERVAL_MS);
+  const cryptoScanTimer = setInterval(() => {
+    void runCryptoScanCycle();
+  }, CRYPTO_SCAN_INTERVAL_MS);
   const moneyTestScanTimer = setInterval(() => {
     void runMoneyTestScanCycle();
   }, MONEY_TEST_SCAN_INTERVAL_MS);
@@ -6634,6 +6870,7 @@ export function startTelegramBot() {
     clearInterval(waveScanTimer);
     clearInterval(smartMoneyScanTimer);
     clearInterval(commodityScanTimer);
+    clearInterval(cryptoScanTimer);
     clearInterval(moneyTestScanTimer);
     clearInterval(replitScanTimer);
     clearInterval(alphaScanTimer);
@@ -6642,6 +6879,7 @@ export function startTelegramBot() {
     clearInterval(learningEvaluationTimer);
     smartMoneyNotifier = null;
     commodityNotifier = null;
+    cryptoNotifier = null;
     moneyTestNotifier = null;
     replitNotifier = null;
     alphaNotifier = null;
@@ -6655,6 +6893,7 @@ export function startTelegramBot() {
       await ensureTelegramSubscriptionTables();
       await loadSmartMoneySubscriptions();
       await loadCommoditySubscriptions();
+      await loadCryptoSubscriptions();
       await loadMoneyTestSubscriptions();
       await loadReplitSubscriptions();
       await loadAlphaSubscriptions();
@@ -6668,6 +6907,7 @@ export function startTelegramBot() {
           { command: "intraday", description: "Внутридневной сканер IMOEX" },
           { command: "smartmoney", description: "Smart Money SMC-сетапы IMOEX" },
           { command: "commodities", description: "Золото, серебро и Brent · Smart Money" },
+          { command: "crypto", description: "Криптовалюты Bybit · Smart Money" },
           { command: "moneytest", description: "Экспериментальный intraday Smart Money" },
           { command: "alpha", description: "Комбинированная стратегия Alpha Retest + Smart Money" },
           { command: "movement", description: "Ранний детектор движения 1H: sweep-and-reversal + стакан" },
@@ -6686,6 +6926,7 @@ export function startTelegramBot() {
       void runIntradayScanCycle();
       void runSmartMoneyScanCycle();
       void runCommodityScanCycle();
+      void runCryptoScanCycle();
       void runMoneyTestScanCycle();
       void runReplitScanCycle();
       void runAlphaScanCycle();
