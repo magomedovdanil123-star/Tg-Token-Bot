@@ -70,7 +70,8 @@ const WAVES_BUTTON = "🌊 Волновой анализ";
 const WAVE_STATS_BUTTON = "📒 Статистика волн";
 const SMART_MONEY_BUTTON = "💰 Smart Money";
 const COMMODITIES_BUTTON = "🪙 Сырьё и металлы";
-const CRYPTO_BUTTON = "₿ Crypto Smart Money";
+const CRYPTO_BUTTON = "₿ Крипта · Smart Money";
+const LEGACY_CRYPTO_BUTTON = "₿ Crypto Smart Money";
 const MONEY_TEST_BUTTON = "💵 Деньги тест";
 const REPLIT_BUTTON = "🧠 Replit";
 const ALPHA_BUTTON  = "🚀 Альфа";
@@ -2983,6 +2984,7 @@ function isCryptoRequest(text: string) {
   const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
   return (
     normalizedText === CRYPTO_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === LEGACY_CRYPTO_BUTTON.toLocaleLowerCase("ru-RU") ||
     normalizedText === "crypto" ||
     normalizedText === "крипта" ||
     normalizedText === "криптовалюта" ||
@@ -3159,7 +3161,7 @@ async function smartMoneyCandidateText(
     `FVG: ${candidate.fairValueGap ?? "не найден"}`,
     `Объём: ${candidate.volumeConfirmed ? "подтверждён" : "не подтверждён"} · ретест: ${candidate.retestConfirmed ? "подтверждён" : "не подтверждён"}`,
     `Согласование старших ТФ: ${candidate.higherTimeframeAgreement.join(", ")}`,
-    `Режим IMOEX: ${candidate.marketRegime === "BUY" ? "сильный рынок" : candidate.marketRegime === "SELL" ? "слабый рынок" : "нейтральный"}${candidate.marketContextConfirmed ? "" : " · направление не подтверждено"}`,
+    `Режим рынка: ${candidate.marketRegime === "BUY" ? "сильный рынок" : candidate.marketRegime === "SELL" ? "слабый рынок" : "нейтральный"}${candidate.marketContextConfirmed ? "" : " · направление не подтверждено"}`,
     `Импульс BOS: ${candidate.impulseConfirmed ? "подтверждён" : "слабый"} · ${formatNumber(candidate.bosQuality, 2)} ATR`,
     `Размер сигнальной свечи: ${formatNumber(candidate.rangeToAtr, 2)} ATR`,
     "",
