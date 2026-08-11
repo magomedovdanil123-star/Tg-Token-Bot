@@ -2954,7 +2954,7 @@ function topConfirmations(
 async function getTopAnalysisStats() {
   const result = await db.execute(sql`
     SELECT
-      (SELECT COUNT(*)::int FROM moex_tickers WHERE is_active = true AND secid <> 'IMOEX') AS tickers,
+      (SELECT COUNT(*)::int FROM moex_tickers WHERE is_active = true AND board_id = 'TQBR' AND secid <> 'IMOEX') AS tickers,
       (SELECT COUNT(*)::bigint FROM candles WHERE timeframe = ${TIMEFRAME}) AS candles,
       (SELECT COUNT(*)::bigint FROM features) AS features,
       (SELECT COUNT(*)::bigint FROM detected_patterns) AS detected_patterns,
@@ -5355,14 +5355,17 @@ async function notifyAlphaSmartMoneyCandidates(candidates: SmartMoneyCandidate[]
   }
 }
 
-async function smartMoneyText(chatId?: number) {
+async function smartMoneyText(chatId?: number): Promise<TelegramMessage> {
   if (chatId !== undefined && Number.isSafeInteger(chatId)) {
     await subscribeSmartMoneyChat(chatId);
   }
   try {
     await ensureSmartMoneyDataFresh();
     await ensureSmartMoneyHigherTimeframes(false);
-    const scan = await scanSmartMoney();
+    const scan = await scanSmartMoney(undefined, {
+      universe: "imoex",
+      source: "smartmoney",
+    });
     const records = await recordSmartMoneyCandidates(scan.candidates);
     await notifySmartMoneyCandidates(records.recordedCandidates);
     const blocks = await Promise.all(
@@ -5370,31 +5373,37 @@ async function smartMoneyText(chatId?: number) {
         smartMoneyCandidateText(candidate, index + 1, chatId),
       ),
     );
-    return [
-      "💰 SMART MONEY · SMC IMOEX",
-      "",
-      `Проверено акций: ${scan.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
-      "Автоматический сканер: все акции · обновление примерно каждые 2 минуты.",
-      "",
-      ...(blocks.length
-        ? blocks.flatMap((block) => [block, ""])
-        : [
-            "Сейчас подтверждённых точек входа LONG или SHORT нет.",
-            "",
-            "Проверка продолжается автоматически. Сообщение придёт, когда появится подтверждённый Smart Money-сетап.",
-          ]),
-      scan.marketContextWarning
-        ? "Направление IMOEX временно не подтверждено; свежие акции проверены без него."
-        : null,
-    ].join("\n");
+    return {
+      text: [
+        "💰 SMART MONEY · SMC IMOEX",
+        "",
+        `Проверено акций: ${scan.analyzed} · обновлено: ${formatDate(scan.generatedAt)}`,
+        "Автоматический сканер: российские акции IMOEX · обновление примерно каждые 2 минуты.",
+        "",
+        ...(blocks.length
+          ? blocks.flatMap((block) => [block, ""])
+          : [
+              "Сейчас подтверждённых точек входа LONG или SHORT нет.",
+              "",
+              "Проверка продолжается автоматически. Сообщение придёт, когда появится подтверждённый Smart Money-сетап.",
+            ]),
+        scan.marketContextWarning
+          ? "Направление IMOEX временно не подтверждено; свежие акции проверены без него."
+          : null,
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
   } catch (error) {
     logger.error({ err: error }, "Smart Money scan failed");
-    return [
-      "💰 SMART MONEY · SMC IMOEX",
-      "",
-      "Не удалось завершить Smart Money-сканирование.",
-      "Сигналы не формирую, чтобы не использовать неполные данные.",
-    ].join("\n");
+    return {
+      text: [
+        "💰 SMART MONEY · SMC IMOEX",
+        "",
+        "Не удалось завершить Smart Money-сканирование.",
+        "Сигналы не формирую, чтобы не использовать неполные данные.",
+      ].join("\n"),
+      replyMarkup: TELEGRAM_MENU,
+    };
   }
 }
 
@@ -5410,7 +5419,13 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
         WHERE timeframe = '1h'
           AND ticker <> 'IMOEX'
           AND (
-            ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+            ticker IN (
+              SELECT secid
+              FROM moex_tickers
+              WHERE is_active = true
+                AND board_id = 'TQBR'
+                AND secid <> 'IMOEX'
+            )
             OR ticker IN (${sql.join(
               SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,
@@ -5481,7 +5496,13 @@ async function ensureSmartMoneyDataFresh() {
         WHERE timeframe IN ('1m', '1h')
           AND ticker <> 'IMOEX'
           AND (
-            ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+            ticker IN (
+              SELECT secid
+              FROM moex_tickers
+              WHERE is_active = true
+                AND board_id = 'TQBR'
+                AND secid <> 'IMOEX'
+            )
             OR ticker IN (${sql.join(
               SMART_MONEY_TICKERS.map((ticker) => sql`${ticker}`),
               sql`, `,
@@ -5525,7 +5546,10 @@ async function runSmartMoneyScanCycle() {
   try {
     await refreshLatestIntradayData();
     await ensureSmartMoneyHigherTimeframes();
-    const scan = await scanSmartMoney();
+    const scan = await scanSmartMoney(undefined, {
+      universe: "imoex",
+      source: "smartmoney",
+    });
     const records = await recordSmartMoneyCandidates(scan.candidates);
     await notifySmartMoneyCandidates(records.recordedCandidates);
     logger.info(

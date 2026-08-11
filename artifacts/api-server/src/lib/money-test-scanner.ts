@@ -74,7 +74,13 @@ async function analyzeMarket(timestamp: Date): Promise<MoneyTestMarket> {
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS row_number
       FROM candles
       WHERE timeframe = '1m'
-        AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+        AND ticker IN (
+          SELECT secid
+          FROM moex_tickers
+          WHERE is_active = true
+            AND board_id = 'TQBR'
+            AND secid <> 'IMOEX'
+        )
     ) latest
     WHERE row_number <= 2
     ORDER BY ticker, timestamp DESC
@@ -136,7 +142,13 @@ async function liquidityByTicker() {
     FROM candles
     WHERE timeframe = '1m'
       AND (
-        ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true)
+        ticker IN (
+          SELECT secid
+          FROM moex_tickers
+          WHERE is_active = true
+            AND board_id = 'TQBR'
+            AND secid <> 'IMOEX'
+        )
         OR ticker IN (${sql.join(
           MONEY_TEST_TICKERS.map((ticker) => sql`${ticker}`),
           sql`, `,

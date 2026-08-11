@@ -129,6 +129,7 @@ async function loadHourlyRows() {
           SELECT secid
           FROM moex_tickers
           WHERE is_active = true
+            AND board_id = 'TQBR'
             AND secid <> 'IMOEX'
         )
     ) recent
@@ -164,6 +165,7 @@ async function loadLatestPrices() {
           SELECT secid
           FROM moex_tickers
           WHERE is_active = true
+            AND board_id = 'TQBR'
             AND secid <> 'IMOEX'
         )
     ) recent
@@ -205,6 +207,7 @@ async function loadMinuteRows() {
           SELECT secid
           FROM moex_tickers
           WHERE is_active = true
+            AND board_id = 'TQBR'
             AND secid <> 'IMOEX'
         )
     ) recent
