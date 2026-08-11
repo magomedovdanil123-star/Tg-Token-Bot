@@ -1,0 +1,9 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "JDZ4g0rpx4-B24GZPK8IL"
+uri = "file://reports/tinvest-stock-analysis-2026-08-11.md"
+type = "text"
+title = "Финальный отчёт Per-Stock анализа IMOEX"
+description = "Исправленный отчёт по 42 бумагам: 365 дней 15m-истории T-Invest, количество сетапов по каждой бумаге, train/validation/test, win rate, средняя доходность и Profit Factor."
