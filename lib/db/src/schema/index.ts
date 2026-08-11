@@ -793,6 +793,109 @@ export const backtestResults = pgTable(
   ],
 );
 
+// ── Per-Stock Setup Scanner ──────────────────────────────────────────────────
+
+export const stockSetups = pgTable(
+  "stock_setups",
+  {
+    id: serial("id").primaryKey(),
+    ticker: varchar("ticker", { length: 32 }).notNull(),
+    setupIndex: integer("setup_index").notNull(),
+    direction: varchar("direction", { length: 8 }).notNull().default("LONG"),
+    conditions: jsonb("conditions")
+      .notNull()
+      .$type<{ feature: string; label: string }[]>(),
+    targetPercent: doublePrecision("target_percent").notNull(),
+    horizonBars: integer("horizon_bars").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    trainOccurrences: integer("train_occurrences"),
+    trainWinRate: doublePrecision("train_win_rate"),
+    valOccurrences: integer("val_occurrences"),
+    valWinRate: doublePrecision("val_win_rate"),
+    testOccurrences: integer("test_occurrences"),
+    testWinRate: doublePrecision("test_win_rate"),
+    testAvgReturn: doublePrecision("test_avg_return"),
+    testMedianReturn: doublePrecision("test_median_return"),
+    testProfitFactor: doublePrecision("test_profit_factor"),
+    testMaxDrawdown: doublePrecision("test_max_drawdown"),
+    testAvgMae: doublePrecision("test_avg_mae"),
+    testAvgMfe: doublePrecision("test_avg_mfe"),
+    confidence: doublePrecision("confidence"),
+    discoveredAt: timestamp("discovered_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("stock_setups_ticker_idx_dir_target_uq").on(
+      table.ticker,
+      table.setupIndex,
+      table.direction,
+      table.targetPercent,
+    ),
+    index("stock_setups_active_conf_idx").on(
+      table.ticker,
+      table.isActive,
+      table.confidence,
+    ),
+  ],
+);
+
+export const liveSetupMatches = pgTable(
+  "live_setup_matches",
+  {
+    id: serial("id").primaryKey(),
+    setupId: integer("setup_id")
+      .notNull()
+      .references(() => stockSetups.id, { onDelete: "cascade" }),
+    ticker: varchar("ticker", { length: 32 }).notNull(),
+    matchedAt: timestamp("matched_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    currentPrice: doublePrecision("current_price").notNull(),
+    confidenceScore: doublePrecision("confidence_score").notNull(),
+    matchDetails: jsonb("match_details").$type<Record<string, unknown>>(),
+    notifiedAt: timestamp("notified_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    signalId: integer("signal_id"),
+  },
+  (table) => [
+    index("live_setup_matches_matched_idx").on(table.matchedAt),
+    index("live_setup_matches_ticker_matched_idx").on(
+      table.ticker,
+      table.matchedAt,
+    ),
+  ],
+);
+
+export const telegramSetupSubscriptions = pgTable(
+  "telegram_setup_subscriptions",
+  {
+    chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
+    subscribedAt: timestamp("subscribed_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
+// ────────────────────────────────────────────────────────────────────────────
+
 export const insertMoexTickerSchema = createInsertSchema(moexTickers).omit({
   id: true,
 });
@@ -827,4 +930,8 @@ export type TelegramMoneyTestSubscription =
 export type TelegramPositionSetting = typeof telegramPositionSettings.$inferSelect;
 export type StrategyResult = typeof strategyResults.$inferSelect;
 export type BacktestResult = typeof backtestResults.$inferSelect;
+export type StockSetup = typeof stockSetups.$inferSelect;
+export type LiveSetupMatch = typeof liveSetupMatches.$inferSelect;
+export type TelegramSetupSubscription =
+  typeof telegramSetupSubscriptions.$inferSelect;
 export type InsertCandle = z.infer<typeof insertCandleSchema>;

@@ -57,6 +57,13 @@ import {
   scanEarlyMovement,
   type EarlyMovementCandidate,
 } from "./early-movement-scanner";
+import {
+  scanStockSetups,
+  formatSetupMatch,
+  formatSetupRanking,
+  getSetupsStats,
+  type SetupMatchResult,
+} from "./stock-setup-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const PNPM_COMMAND =
@@ -83,6 +90,8 @@ const ALPHA_BUTTON  = "🚀 Альфа";
 const MOVEMENT_BUTTON = "📡 Импульс акций";
 const COMPANY_ANALYSIS_BUTTON = "🔎 Аналитика компании";
 const AVERAGING_BUTTON = "📐 Усреднение / банк";
+const SETUPS_BUTTON = "📈 Сетапы IMOEX";
+const SETUP_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const SIGNAL_MAX_AGE_MINUTES = 30;
 const ENTRY_EXIT_GRACE_MINUTES = 30;
 const PAPER_HORIZON_MINUTES = 360;
@@ -128,6 +137,7 @@ const TELEGRAM_MENU = {
   keyboard: [
     [SMART_MONEY_BUTTON],
     [CRYPTO_BUTTON],
+    [SETUPS_BUTTON],
     [ALPHA_BUTTON],
     [MOVEMENT_BUTTON],
     [COMMODITIES_BUTTON],
@@ -173,7 +183,35 @@ let alphaScanRunning = false;
 let movementNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
 const movementChatIds = new Set<number>();
 let movementScanRunning = false;
+let setupScanRunning = false;
+let setupNotifier: ((chatId: number, text: string) => Promise<unknown>) | null = null;
+const setupChatIds = new Set<number>();
 const pendingBankChats = new Set<number>();
+
+async function loadSetupSubscriptions() {
+  try {
+    const rows = await db.execute<{ chat_id: string }>(sql`
+      SELECT chat_id FROM telegram_setup_subscriptions
+    `);
+    for (const r of rows.rows) {
+      const chatId = Number(r.chat_id);
+      if (Number.isSafeInteger(chatId)) setupChatIds.add(chatId);
+    }
+    logger.info({ count: setupChatIds.size }, "Setup scanner Telegram subscriptions loaded");
+  } catch {
+    // Table may not exist yet; will be created on first subscribe
+  }
+}
+
+async function subscribeSetupChat(chatId: number) {
+  if (!Number.isSafeInteger(chatId)) return;
+  setupChatIds.add(chatId);
+  await db.execute(sql`
+    INSERT INTO telegram_setup_subscriptions (chat_id)
+    VALUES (${chatId})
+    ON CONFLICT (chat_id) DO NOTHING
+  `);
+}
 
 async function ensureTelegramSubscriptionTables() {
   await db.execute(sql`
@@ -4825,6 +4863,81 @@ async function runCryptoScanCycle() {
   }
 }
 
+async function runSetupScanCycle() {
+  if (setupScanRunning) return;
+  setupScanRunning = true;
+  try {
+    const matches = await scanStockSetups();
+    // Notify only top match if confidence >= 60 and not yet notified today
+    if (setupNotifier && matches.length > 0) {
+      const top = matches[0];
+      if (top.confidenceScore >= 60) {
+        const alreadyNotified = await db.execute<{ cnt: string }>(sql`
+          SELECT count(*) AS cnt
+          FROM live_setup_matches
+          WHERE setup_id = ${top.setupId}
+            AND notified_at >= now() - interval '8 hours'
+        `);
+        if (Number(alreadyNotified.rows[0]?.cnt ?? 0) === 0) {
+          const text = [
+            "📈 СЕТАП IMOEX · СОВПАДЕНИЕ",
+            "",
+            formatSetupMatch(top),
+          ].join("\n");
+          for (const chatId of setupChatIds) {
+            await setupNotifier(chatId, text);
+          }
+          await db.execute(sql`
+            UPDATE live_setup_matches
+            SET notified_at = now()
+            WHERE setup_id = ${top.setupId}
+              AND notified_at IS NULL
+              AND matched_at >= now() - interval '1 hour'
+          `);
+        }
+      }
+    }
+    logger.info(
+      { matches: matches.length, top: matches[0]?.ticker },
+      "Stock setup scan cycle completed",
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Stock setup scan cycle skipped");
+  } finally {
+    setupScanRunning = false;
+  }
+}
+
+async function setupsText(chatId: number): Promise<string> {
+  await subscribeSetupChat(chatId);
+  try {
+    const matches = await scanStockSetups();
+    return formatSetupRanking(matches);
+  } catch {
+    return [
+      "📈 Сетапы IMOEX",
+      "",
+      "Сетапы ещё не обнаружены или база пуста.",
+      "",
+      "Для запуска первичного обнаружения:",
+      "`pnpm --filter @workspace/scripts run discover-setups`",
+      "",
+      "После этого кнопка будет показывать топ совпадений в реальном времени.",
+    ].join("\n");
+  }
+}
+
+function isSetupsRequest(text: string) {
+  const t = text.toLowerCase().trim();
+  return (
+    t === SETUPS_BUTTON.toLowerCase() ||
+    t === "сетапы" ||
+    t === "сетапы imoex" ||
+    t === "/setups" ||
+    t === "/setups_imoex"
+  );
+}
+
 function waveHorizonMinutes(timeframe: string) {
   return timeframe === "30m" ? 720 : 1440;
 }
@@ -6688,6 +6801,12 @@ async function handleMessage(chatId: number, text: string) {
   if (isReplitRequest(text)) {
     return replitText(chatId);
   }
+  if (isSetupsRequest(text)) {
+    return setupsText(chatId);
+  }
+  if (normalizedCommand === "/setups_stats") {
+    return getSetupsStats();
+  }
   if (isWavesRequest(text)) {
     return wavesText(chatId);
   }
@@ -6823,6 +6942,7 @@ export function startTelegramBot() {
   replitNotifier = client.sendMessage;
   alphaNotifier = client.sendMessage;
   movementNotifier = client.sendMessage;
+  setupNotifier = client.sendMessage;
   const intradayScanTimer = setInterval(() => {
     void runIntradayScanCycle();
   }, INTRADAY_SCAN_INTERVAL_MS);
@@ -6850,6 +6970,9 @@ export function startTelegramBot() {
   const movementScanTimer = setInterval(() => {
     void runMovementScanCycle();
   }, MOVEMENT_SCAN_INTERVAL_MS);
+  const setupScanTimer = setInterval(() => {
+    void runSetupScanCycle();
+  }, SETUP_SCAN_INTERVAL_MS);
   const paperEvaluationTimer = setInterval(() => {
     if (paperEvaluationRunning) return;
     paperEvaluationRunning = true;
@@ -6885,6 +7008,7 @@ export function startTelegramBot() {
     clearInterval(replitScanTimer);
     clearInterval(alphaScanTimer);
     clearInterval(movementScanTimer);
+    clearInterval(setupScanTimer);
     clearInterval(paperEvaluationTimer);
     clearInterval(learningEvaluationTimer);
     smartMoneyNotifier = null;
@@ -6908,6 +7032,7 @@ export function startTelegramBot() {
       await loadReplitSubscriptions();
       await loadAlphaSubscriptions();
       await loadMovementSubscriptions();
+      await loadSetupSubscriptions();
       await client.setMyCommands(
         JSON.stringify([
           { command: "analysis", description: "Smart Money по выбранной акции" },
@@ -6928,6 +7053,8 @@ export function startTelegramBot() {
           { command: "top", description: "Лучшие сигналы" },
           { command: "analogs", description: "Аналогичные рыночные ситуации" },
           { command: "accuracy", description: "Точность paper-сигналов" },
+          { command: "setups", description: "Сетапы IMOEX — исторически подтверждённые комбинации" },
+          { command: "setups_stats", description: "База сетапов: статистика по тикерам" },
           { command: "refresh", description: "Обновить данные и исследование" },
           { command: "help", description: "Справка" },
         ]),
