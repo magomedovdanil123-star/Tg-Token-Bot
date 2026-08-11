@@ -679,7 +679,13 @@ async function analyzeTicker(ticker: string, benchmark: Map<number, Candle>): Pr
 
 async function loadBenchmark(tickers: string[]): Promise<Map<number, Candle>> {
   if (cli["no-benchmark"] === "true") return new Map();
-  const instrument = await lookupInstrument("IMOEX");
+  let instrument: TInvestInstrument | null = null;
+  try {
+    instrument = await lookupInstrument("IMOEX");
+  } catch (error) {
+    process.stderr.write(`IMOEX benchmark unavailable: ${String(error)}\n`);
+    return new Map();
+  }
   if (!instrument?.figi) return new Map();
   process.stdout.write("IMOEX benchmark: ");
   const candles = await loadTickerCandles(instrument.figi);
