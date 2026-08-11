@@ -922,6 +922,19 @@ async function recordPaperSignal(input: {
   bypassRiskLimits?: boolean;
 }): Promise<PaperRecordResult> {
   if (input.direction === "HOLD") return "risk_limit";
+  const isUsdtTicker = /USDT$/i.test(input.ticker);
+  if (
+    isUsdtTicker !== (input.source === "crypto-smartmoney")
+  ) {
+    logger.warn(
+      {
+        ticker: input.ticker,
+        source: input.source,
+      },
+      "Blocked signal with an invalid market universe",
+    );
+    return "risk_limit";
+  }
   const timeframe = input.timeframe ?? TIMEFRAME;
   const existing = await db
     .select({ id: signalsHistory.id })
