@@ -507,6 +507,11 @@ export async function scanSmartMoney(
   const source = options.source ?? "smartmoney";
   const generatedAt = new Date();
   const adaptiveThreshold = await getAdaptiveThreshold(source);
+  // Keep market universes isolated even if a stale/incorrect row was
+  // accidentally marked active in moex_tickers. BYBIT symbols belong only to
+  // the explicit crypto universe; ordinary Smart Money and money-test are
+  // MOEX shares from the TQBR board.
+  const moexSharesOnly = eq(moexTickers.boardId, "TQBR");
   const tickerRows = await db
     .select({ ticker: moexTickers.secid })
     .from(moexTickers)
@@ -527,19 +532,31 @@ export async function scanSmartMoney(
               )
         : universe === "money-test"
           ? requestedTicker
-            ? inArray(moexTickers.secid, [requestedTicker])
+            ? and(
+                moexSharesOnly,
+                inArray(moexTickers.secid, [requestedTicker]),
+              )
             : or(
-                inArray(moexTickers.secid, [...MONEY_TEST_TICKERS]),
+                and(
+                  moexSharesOnly,
+                  inArray(moexTickers.secid, [...MONEY_TEST_TICKERS]),
+                ),
               )
         : requestedTicker
-          ? or(
-              eq(moexTickers.isActive, true),
-              eq(moexTickers.secid, requestedTicker),
-              inArray(moexTickers.secid, [...SMART_MONEY_TICKERS]),
+          ? and(
+              moexSharesOnly,
+              or(
+                eq(moexTickers.isActive, true),
+                eq(moexTickers.secid, requestedTicker),
+                inArray(moexTickers.secid, [...SMART_MONEY_TICKERS]),
+              ),
             )
-          : or(
-              eq(moexTickers.isActive, true),
-              inArray(moexTickers.secid, [...SMART_MONEY_TICKERS]),
+          : and(
+              moexSharesOnly,
+              or(
+                eq(moexTickers.isActive, true),
+                inArray(moexTickers.secid, [...SMART_MONEY_TICKERS]),
+              ),
             ),
     )
     .orderBy(desc(moexTickers.rank));

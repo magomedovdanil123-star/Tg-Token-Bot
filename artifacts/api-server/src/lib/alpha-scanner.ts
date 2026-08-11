@@ -129,7 +129,13 @@ async function loadHourlyRows(): Promise<Map<string, Candle[]>> {
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS rn
       FROM candles
       WHERE timeframe = '1h'
-        AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true AND secid <> 'IMOEX')
+        AND ticker IN (
+          SELECT secid
+          FROM moex_tickers
+          WHERE is_active = true
+            AND board_id = 'TQBR'
+            AND secid <> 'IMOEX'
+        )
     ) t WHERE rn <= ${HOUR_ROWS}
     ORDER BY ticker, timestamp
   `);
@@ -155,7 +161,13 @@ async function loadMinuteRows(): Promise<Map<string, Candle[]>> {
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS rn
       FROM candles
       WHERE timeframe = '1m'
-        AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true AND secid <> 'IMOEX')
+        AND ticker IN (
+          SELECT secid
+          FROM moex_tickers
+          WHERE is_active = true
+            AND board_id = 'TQBR'
+            AND secid <> 'IMOEX'
+        )
     ) t WHERE rn <= ${MINUTE_ROWS}
     ORDER BY ticker, timestamp
   `);
@@ -180,7 +192,13 @@ async function loadLatestPrices(): Promise<Map<string, { price: number; timestam
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS rn
       FROM candles
       WHERE timeframe = '1m'
-        AND ticker IN (SELECT secid FROM moex_tickers WHERE is_active = true AND secid <> 'IMOEX')
+        AND ticker IN (
+          SELECT secid
+          FROM moex_tickers
+          WHERE is_active = true
+            AND board_id = 'TQBR'
+            AND secid <> 'IMOEX'
+        )
     ) t WHERE rn = 1
   `);
   const prices = new Map<string, { price: number; timestamp: Date }>();
