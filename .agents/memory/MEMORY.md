@@ -24,3 +24,4 @@
 - [Timeweb build cache](timeweb-build-cache.md) — rebuild db declarations and clear TypeScript caches when synced source exports appear missing on production.
 - [Replit/MTS event discovery](replit-discovery.md) — current event candidates are too unstable after causal IMOEX filtering and costs; keep the scanner fail-closed.
 - [T-Invest API integration](tinvest-api.md) — use node:https Agent(rejectUnauthorized:false) for TLS; undici not installed; token in TINKOFF_INVEST_TOKEN + Timeweb .env.
+- [T-Invest stock analysis](tinvest-stock-analysis.md) — download 15m history in ≤14-day windows; IMOEX lookup may be unavailable; reject high-WR setups with bad economics.
