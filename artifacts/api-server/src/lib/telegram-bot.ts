@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import {
   candles,
   db,
@@ -58,6 +59,9 @@ import {
 } from "./early-movement-scanner";
 
 const TELEGRAM_API = "https://api.telegram.org";
+const PNPM_COMMAND =
+  process.env.PNPM_BIN ??
+  (existsSync("/usr/local/bin/pnpm") ? "/usr/local/bin/pnpm" : "pnpm");
 const TIMEFRAME = "10m";
 const MIN_TRADE_PERCENT = 0.3;
 const POLL_TIMEOUT_SECONDS = 25;
@@ -3229,7 +3233,7 @@ async function refreshCommodityData() {
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(
-        "pnpm",
+        PNPM_COMMAND,
         [
           "--filter",
           "@workspace/scripts",
@@ -4964,7 +4968,7 @@ async function refreshWaveData() {
       const days = (countByTimeframe.get(timeframe) ?? 0) >= 5000 ? 5 : 730;
       await new Promise<void>((resolve, reject) => {
         const child = spawn(
-          "pnpm",
+          PNPM_COMMAND,
           [
             "--filter",
             "@workspace/scripts",
@@ -5313,7 +5317,7 @@ function ensureSmartMoneyHigherTimeframes(waitForWaveRefresh = true) {
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(
-        "pnpm",
+        PNPM_COMMAND,
         [
           "--filter",
           "@workspace/scripts",
@@ -5715,7 +5719,7 @@ function startResearchRefresh(notify: (text: string) => Promise<unknown>) {
 
   researchRefreshRunning = true;
   const child = spawn(
-    "pnpm",
+    PNPM_COMMAND,
     [
       "--filter",
       "@workspace/scripts",
@@ -5819,7 +5823,7 @@ function refreshLatestMarketData() {
   if (latestMarketRefresh) return latestMarketRefresh;
   latestMarketRefresh = new Promise<void>((resolve, reject) => {
     const child = spawn(
-      "pnpm",
+      PNPM_COMMAND,
       [
         "--filter",
         "@workspace/scripts",
@@ -5862,7 +5866,7 @@ function refreshLatestIntradayData() {
   if (latestIntradayRefresh) return latestIntradayRefresh;
   latestIntradayRefresh = new Promise<void>((resolve, reject) => {
     const child = spawn(
-      "pnpm",
+      PNPM_COMMAND,
       [
         "--filter",
         "@workspace/scripts",
@@ -5910,7 +5914,7 @@ function refreshCompanyAnalysisData(ticker: string) {
   const runImport = (timeframe: string, days: number) =>
     new Promise<void>((resolve, reject) => {
       const child = spawn(
-        "pnpm",
+        PNPM_COMMAND,
         [
           "--filter",
           "@workspace/scripts",

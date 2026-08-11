@@ -693,9 +693,20 @@ async function saveCandles(rows: CandleRow[]) {
     const batch = rows.slice(index, index + 500);
     const saved = await db
       .insert(candles)
-      .values(batch.map((row) => ({ ...row, timeframe: TIMEFRAME })))
+      .values(
+        batch.map((row) => ({
+          ...row,
+          timeframe: TIMEFRAME,
+          source: "moex_iss",
+        })),
+      )
       .onConflictDoUpdate({
-        target: [candles.ticker, candles.timeframe, candles.timestamp],
+        target: [
+          candles.ticker,
+          candles.timeframe,
+          candles.timestamp,
+          candles.source,
+        ],
         set: {
           open: sql.raw('excluded."open"'),
           high: sql.raw('excluded."high"'),
