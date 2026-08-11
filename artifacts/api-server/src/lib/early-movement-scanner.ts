@@ -170,7 +170,17 @@ async function loadHourlyCandles(
       SELECT ticker, timestamp, open, high, low, close, volume,
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS rn
       FROM candles
-      WHERE timeframe = '1h' AND ticker NOT IN ('XAUUSD','XAGUSD','BRENT')
+      WHERE timeframe = '1h'
+        AND ticker NOT IN ('XAUUSD','XAGUSD','BRENT')
+        AND (
+          ticker = 'IMOEX'
+          OR ticker IN (
+            SELECT secid
+            FROM moex_tickers
+            WHERE is_active = true
+              AND board_id = 'TQBR'
+          )
+        )
     ) t WHERE rn <= ${HOUR_ROWS}
     ORDER BY ticker, timestamp
   `);
@@ -208,7 +218,15 @@ async function loadLatestPrices(now: Date): Promise<Map<string, { price: number;
     FROM (
       SELECT ticker, close, timestamp,
         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) AS rn
-      FROM candles WHERE timeframe='1m' AND ticker NOT IN ('IMOEX','XAUUSD','XAGUSD','BRENT')
+      FROM candles
+      WHERE timeframe = '1m'
+        AND ticker NOT IN ('IMOEX','XAUUSD','XAGUSD','BRENT')
+        AND ticker IN (
+          SELECT secid
+          FROM moex_tickers
+          WHERE is_active = true
+            AND board_id = 'TQBR'
+        )
     ) t WHERE rn = 1
   `);
   const prices = new Map<string, { price: number; timestamp: Date }>();

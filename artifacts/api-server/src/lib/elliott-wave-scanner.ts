@@ -779,7 +779,10 @@ export async function scanElliottWaveStrategies(): Promise<ElliottScanResult> {
         c.volume,
         ROW_NUMBER() OVER (PARTITION BY c.ticker, c.timeframe ORDER BY c.timestamp DESC) AS row_number
       FROM candles c
-      INNER JOIN moex_tickers t ON t.secid = c.ticker AND t.is_active = true
+       INNER JOIN moex_tickers t
+         ON t.secid = c.ticker
+        AND t.is_active = true
+        AND t.board_id = 'TQBR'
       WHERE c.timeframe IN ('30m', '1h')
     )
     SELECT ticker, timeframe, timestamp, open, high, low, close, volume
@@ -868,7 +871,10 @@ export async function backtestElliottWaveMonth(options?: WaveBacktestOptions): P
   const result = await db.execute(sql`
     SELECT c.ticker, c.timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume
     FROM candles c
-    INNER JOIN moex_tickers t ON t.secid = c.ticker AND t.is_active = true
+     INNER JOIN moex_tickers t
+       ON t.secid = c.ticker
+      AND t.is_active = true
+      AND t.board_id = 'TQBR'
     WHERE c.timeframe IN ('30m', '1h')
       AND c.timestamp >= ${historyStart}
       AND c.timestamp <= ${periodEnd}

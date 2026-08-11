@@ -231,7 +231,9 @@ async function loadCurrentSnapshot(): Promise<SnapshotRow[]> {
     WITH active AS (
       SELECT secid
       FROM moex_tickers
-      WHERE is_active = true AND secid <> 'IMOEX'
+       WHERE is_active = true
+         AND board_id = 'TQBR'
+         AND secid <> 'IMOEX'
     )
     SELECT
       a.secid AS ticker,
@@ -415,7 +417,10 @@ async function loadHistoricalVectors(
       AND c.timeframe = ${TIMEFRAME}
       AND c.timestamp = f.timestamp
     INNER JOIN moex_tickers t
-      ON t.secid = f.ticker AND t.is_active = true AND t.secid <> 'IMOEX'
+       ON t.secid = f.ticker
+      AND t.is_active = true
+      AND t.board_id = 'TQBR'
+      AND t.secid <> 'IMOEX'
     WHERE f.timestamp >= ${new Date(currentDate.getTime() - LOOKBACK_DAYS * 86400000)}
       AND f.timestamp <= ${new Date(currentDate.getTime() - HORIZONS.fiveDays)}
     GROUP BY f.timestamp
@@ -655,7 +660,8 @@ async function saveStockMatches(currentDate: Date) {
       LIMIT 1
     ) five_day ON true
     WHERE a.snapshot_date = ${currentDate}
-      AND t.is_active = true
+       AND t.is_active = true
+       AND t.board_id = 'TQBR'
       AND t.secid <> 'IMOEX'
     ON CONFLICT (snapshot_date, historical_date, ticker) DO UPDATE SET
       similarity_score = EXCLUDED.similarity_score,

@@ -304,6 +304,7 @@ async function getLatestIntradayFeatures() {
       LIMIT ${CANDLE_LIMIT}
     ) c
     WHERE t.is_active = true
+      AND t.board_id = 'TQBR'
       AND t.secid <> 'IMOEX'
     ORDER BY t.secid, c.timestamp
   `);

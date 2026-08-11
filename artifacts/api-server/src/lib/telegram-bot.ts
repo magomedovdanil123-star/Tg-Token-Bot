@@ -1917,6 +1917,7 @@ async function getTopRows() {
       ON c.id = f.candle_id
       AND c.timeframe = ${TIMEFRAME}
     WHERE t.is_active = true
+      AND t.board_id = 'TQBR'
       AND t.secid <> 'IMOEX'
   `);
   return (result.rows as unknown as TopRow[]).map((row) => ({
@@ -2269,7 +2270,10 @@ async function getFactorThresholds(): Promise<Map<string, FactorThresholds>> {
       percentile_cont(0.8) WITHIN GROUP (ORDER BY f.historical_volatility) FILTER (WHERE f.historical_volatility IS NOT NULL) AS volatility_high
     FROM features f
     INNER JOIN candles c ON c.ticker = f.ticker AND c.timestamp = f.timestamp AND c.timeframe = ${TIMEFRAME}
-    INNER JOIN moex_tickers t ON t.secid = f.ticker AND t.is_active = true
+     INNER JOIN moex_tickers t
+       ON t.secid = f.ticker
+       AND t.is_active = true
+       AND t.board_id = 'TQBR'
     GROUP BY f.ticker
   `);
   const thresholds = new Map<string, FactorThresholds>();
@@ -6436,8 +6440,11 @@ async function resolveCompanyTicker(input: string) {
   const result = await db.execute(sql`
     SELECT secid, short_name
     FROM moex_tickers
-    WHERE UPPER(secid) = ${normalized}
-       OR lower(coalesce(short_name, '')) LIKE lower(${"%" + input.trim() + "%"})
+     WHERE board_id = 'TQBR'
+       AND (
+         UPPER(secid) = ${normalized}
+         OR lower(coalesce(short_name, '')) LIKE lower(${"%" + input.trim() + "%"})
+       )
     ORDER BY is_active DESC, rank NULLS LAST
     LIMIT 1
   `);
@@ -6497,7 +6504,10 @@ async function companyAnalysisText(input: string, chatId?: number) {
   try {
     await refreshCompanyAnalysisData(ticker);
     await ensureSmartMoneyHigherTimeframes();
-    const smartScan = await scanSmartMoney(ticker);
+     const smartScan = await scanSmartMoney(ticker, {
+       universe: "imoex",
+       source: "smartmoney",
+     });
     const candidate = smartScan.candidates.find((item) => item.ticker === ticker);
     if (!candidate) {
       logger.info(
@@ -6920,16 +6930,30 @@ function createTelegramClient(token: string) {
         callback_query_id: callbackQueryId,
         text,
       }),
-    getUpdates: (offset: number, signal: AbortSignal) =>
+    getUpdates: (offset: number, signal: AbortSignal, timeout = POLL_TIMEOUT_SECONDS, limit?: number) =>
       call<TelegramUpdate[]>(
         "getUpdates",
         {
           offset,
-          timeout: POLL_TIMEOUT_SECONDS,
+          timeout,
+          limit,
           allowed_updates: JSON.stringify(["message", "callback_query"]),
         },
         signal,
       ),
+    discardPendingUpdates: async (signal: AbortSignal) => {
+      const updates = await call<TelegramUpdate[]>(
+        "getUpdates",
+        {
+          offset: -1,
+          timeout: 0,
+          limit: 1,
+          allowed_updates: JSON.stringify(["message", "callback_query"]),
+        },
+        signal,
+      );
+      return updates.at(-1)?.update_id ?? null;
+    },
     sendMessage: async (
       chatId: number,
       text: string,
@@ -7048,6 +7072,14 @@ export function startTelegramBot() {
     try {
       const me = await client.getMe();
       await client.deleteWebhook();
+      const latestPendingUpdateId = await client.discardPendingUpdates(controller.signal);
+      if (latestPendingUpdateId !== null) {
+        offset = latestPendingUpdateId + 1;
+        logger.info(
+          { offset },
+          "Discarded stale Telegram updates before starting the current bot version",
+        );
+      }
       await ensureTelegramSubscriptionTables();
       await loadSmartMoneySubscriptions();
       await loadCommoditySubscriptions();
