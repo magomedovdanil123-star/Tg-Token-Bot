@@ -13,4 +13,4 @@ The external Timeweb database must have candle uniqueness keyed by `(ticker, tim
 
 **Why:** The application was deployed from GitHub with the new source-aware upsert, but the external production database retained the previous three-column unique index and Telegram returned the generic Bybit refresh failure.
 
-**How to apply:** After schema changes, inspect `pg_indexes` on the Timeweb database and create `candles_ticker_timeframe_timestamp_source_uq` before removing the obsolete `candles_ticker_timeframe_timestamp_uq`; then restart `invest-ai` and wait for a complete crypto scan cycle.
+**How to apply:** After schema changes, inspect `pg_indexes` on the Timeweb database and create `candles_ticker_timeframe_timestamp_source_uq` before removing the obsolete `candles_ticker_timeframe_timestamp_uq`; then restart `invest-ai` and wait for a complete crypto scan cycle. MOEX imports must also set `source = 'moex_iss'` and upsert against the four-column key, or all 1m refreshes fail and Smart Money refuses to scan.
