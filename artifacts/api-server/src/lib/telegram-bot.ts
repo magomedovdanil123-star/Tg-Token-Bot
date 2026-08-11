@@ -69,6 +69,7 @@ const INTRADAY_BUTTON = "⚡ Внутри дня";
 const WAVES_BUTTON = "🌊 Волновой анализ";
 const WAVE_STATS_BUTTON = "📒 Статистика волн";
 const SMART_MONEY_BUTTON = "💰 Smart Money";
+const LEGACY_SMART_MONEY_BUTTON = "IMX";
 const COMMODITIES_BUTTON = "🪙 Сырьё и металлы";
 const CRYPTO_BUTTON = "₿ Крипта · Smart Money";
 const LEGACY_CRYPTO_BUTTON = "₿ Crypto Smart Money";
@@ -2974,6 +2975,9 @@ function isSmartMoneyRequest(text: string) {
   const normalizedText = text.trim().toLocaleLowerCase("ru-RU");
   return (
     normalizedText === SMART_MONEY_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === LEGACY_SMART_MONEY_BUTTON.toLocaleLowerCase("ru-RU") ||
+    normalizedText === "imoex" ||
+    normalizedText === "smart money imoex" ||
     normalizedText === "smart money" ||
     normalizedText === "смарт мани" ||
     normalizedText === "/smartmoney"
