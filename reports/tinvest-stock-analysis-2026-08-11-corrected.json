@@ -1,0 +1,1502 @@
+{
+  "generatedAt": "2026-08-11T01:49:59.654Z",
+  "methodology": {
+    "source": "T-Invest GetCandles",
+    "interval": "15m",
+    "lookbackDays": 365,
+    "targets": [
+      1.5,
+      2
+    ],
+    "horizonsTradingDays": [
+      1,
+      2,
+      3
+    ],
+    "costPercentRoundTrip": 0.2,
+    "split": "train 60% / validation 20% / out-of-sample test 20%",
+    "minimumTrainOccurrences": 30,
+    "minimumOosOccurrences": 15,
+    "minimumTrainWinRate": 0.6,
+    "minimumOosWinRate": 0.55,
+    "sameSessionDeduplication": true,
+    "sameCandleTpSl": "conservative loss",
+    "orderBookHistory": "not available; not used",
+    "liveStrategyChanged": false,
+    "qualityRule": "test win rate >= 60%, profit factor >= 1, average return > 0 for validated label; weak_oos is reported but not production-approved"
+  },
+  "summary": {
+    "tickers": 42,
+    "ok": 41,
+    "insufficientData": 1,
+    "instrumentNotFound": 0,
+    "errors": 0,
+    "totalSetups": 20,
+    "tickersWithSetups": 8,
+    "setupsWithTestWinRateAtLeast70": 4
+  },
+  "reports": [
+    {
+      "ticker": "AFKS",
+      "candles": 25966,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "AFLT",
+      "candles": 27003,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "momentum_up",
+              "label": "Импульс 1ч/4ч вверх"
+            },
+            {
+              "feature": "above_vwap",
+              "label": "Цена выше VWAP"
+            }
+          ],
+          "train": {
+            "occurrences": 213,
+            "wins": 131,
+            "winRate": 0.6150234741784038,
+            "averageReturn": 0.4623090877821306,
+            "medianReturn": 1.3,
+            "profitFactor": 1.8717443264817974,
+            "maxDrawdown": 33.343586114453785,
+            "averageMae": 2.216271193577312,
+            "averageMfe": 2.850296832062428
+          },
+          "validation": {
+            "occurrences": 69,
+            "wins": 45,
+            "winRate": 0.6521739130434783,
+            "averageReturn": 0.2498959646943007,
+            "medianReturn": 1.3,
+            "profitFactor": 1.3739870429392385,
+            "maxDrawdown": 18.049692468268706,
+            "averageMae": 1.8617009082618958,
+            "averageMfe": 2.334446817938449
+          },
+          "test": {
+            "occurrences": 70,
+            "wins": 42,
+            "winRate": 0.6,
+            "averageReturn": 0.18312621545748367,
+            "medianReturn": 1.3,
+            "profitFactor": 1.1567407511578796,
+            "maxDrawdown": 51.94199942724177,
+            "averageMae": 3.0620373497449003,
+            "averageMfe": 4.959340496510025
+          },
+          "confidence": 66,
+          "quality": "validated"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "ema_bull",
+              "label": "EMA20 > EMA50"
+            },
+            {
+              "feature": "rsi_high",
+              "label": "RSI > 65"
+            }
+          ],
+          "train": {
+            "occurrences": 111,
+            "wins": 67,
+            "winRate": 0.6036036036036037,
+            "averageReturn": 0.5505693877948103,
+            "medianReturn": 1.3,
+            "profitFactor": 2.0177235366081554,
+            "maxDrawdown": 15.396368659956572,
+            "averageMae": 2.226614513276525,
+            "averageMfe": 2.888746221910016
+          },
+          "validation": {
+            "occurrences": 42,
+            "wins": 25,
+            "winRate": 0.5952380952380952,
+            "averageReturn": 0.17652771576228485,
+            "medianReturn": 1.3,
+            "profitFactor": 1.243982752084792,
+            "maxDrawdown": 17.132782471557537,
+            "averageMae": 1.9161476324696873,
+            "averageMfe": 2.301641791627265
+          },
+          "test": {
+            "occurrences": 41,
+            "wins": 25,
+            "winRate": 0.6097560975609756,
+            "averageReturn": -0.19207785667739344,
+            "medianReturn": 1.3,
+            "profitFactor": 0.8406308902880035,
+            "maxDrawdown": 37.014555746047115,
+            "averageMae": 3.060483947394504,
+            "averageMfe": 5.056170125369994
+          },
+          "confidence": 60,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "momentum_up",
+              "label": "Импульс 1ч/4ч вверх"
+            },
+            {
+              "feature": "volume_high",
+              "label": "Volume Ratio ≥ 1.5x"
+            }
+          ],
+          "train": {
+            "occurrences": 179,
+            "wins": 111,
+            "winRate": 0.6201117318435754,
+            "averageReturn": 0.43527395540395986,
+            "medianReturn": 1.3,
+            "profitFactor": 1.7497004625748258,
+            "maxDrawdown": 35.64619911972639,
+            "averageMae": 2.1975288238720028,
+            "averageMfe": 2.7884546184089043
+          },
+          "validation": {
+            "occurrences": 64,
+            "wins": 43,
+            "winRate": 0.671875,
+            "averageReturn": 0.4473789809009165,
+            "medianReturn": 1.3,
+            "profitFactor": 1.8358350750258543,
+            "maxDrawdown": 12.485470694684455,
+            "averageMae": 1.709933292824793,
+            "averageMfe": 2.404131749496676
+          },
+          "test": {
+            "occurrences": 59,
+            "wins": 33,
+            "winRate": 0.559322033898305,
+            "averageReturn": 0.17194640816659232,
+            "medianReturn": 1.3,
+            "profitFactor": 1.153413067300147,
+            "maxDrawdown": 37.428175664021154,
+            "averageMae": 3.1806602963844077,
+            "averageMfe": 5.045700219196127
+          },
+          "confidence": 58,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "ema_bull",
+              "label": "EMA20 > EMA50"
+            },
+            {
+              "feature": "below_vwap",
+              "label": "Цена ниже VWAP"
+            }
+          ],
+          "train": {
+            "occurrences": 156,
+            "wins": 94,
+            "winRate": 0.6025641025641025,
+            "averageReturn": 0.5142314741410297,
+            "medianReturn": 1.3,
+            "profitFactor": 2.0446567678071252,
+            "maxDrawdown": 33.61072740903518,
+            "averageMae": 2.1603041023198775,
+            "averageMfe": 2.7791818990700192
+          },
+          "validation": {
+            "occurrences": 54,
+            "wins": 41,
+            "winRate": 0.7592592592592593,
+            "averageReturn": 0.3199541813102363,
+            "medianReturn": 1.3,
+            "profitFactor": 1.4796318456747604,
+            "maxDrawdown": 13.922744966268779,
+            "averageMae": 1.8384829310343553,
+            "averageMfe": 2.4319335782302227
+          },
+          "test": {
+            "occurrences": 51,
+            "wins": 29,
+            "winRate": 0.5686274509803921,
+            "averageReturn": 0.13161994923855416,
+            "medianReturn": 1.3,
+            "profitFactor": 1.122949689492169,
+            "maxDrawdown": 18.195903476771495,
+            "averageMae": 2.897281528194859,
+            "averageMfe": 5.165110563550973
+          },
+          "confidence": 57,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "momentum_up",
+              "label": "Импульс 1ч/4ч вверх"
+            },
+            {
+              "feature": "opening_hour",
+              "label": "Первые 90 минут"
+            }
+          ],
+          "train": {
+            "occurrences": 99,
+            "wins": 61,
+            "winRate": 0.6161616161616161,
+            "averageReturn": 0.6389138865489168,
+            "medianReturn": 1.3,
+            "profitFactor": 2.405686861991253,
+            "maxDrawdown": 12.676894518806577,
+            "averageMae": 1.9283268796968045,
+            "averageMfe": 2.891531279092129
+          },
+          "validation": {
+            "occurrences": 27,
+            "wins": 20,
+            "winRate": 0.7407407407407407,
+            "averageReturn": 0.33925792272185656,
+            "medianReturn": 1.3,
+            "profitFactor": 1.5396157740324992,
+            "maxDrawdown": 8.542808792422438,
+            "averageMae": 1.630211878366749,
+            "averageMfe": 2.6776663788591204
+          },
+          "test": {
+            "occurrences": 29,
+            "wins": 16,
+            "winRate": 0.5517241379310345,
+            "averageReturn": 0.7691557175586081,
+            "medianReturn": 1.3,
+            "profitFactor": 1.7855301708737075,
+            "maxDrawdown": 15.871832369005496,
+            "averageMae": 2.7567734590254633,
+            "averageMfe": 5.716065351653695
+          },
+          "confidence": 44,
+          "quality": "weak_oos"
+        }
+      ],
+      "bestTestWinRate": 0.6097560975609756
+    },
+    {
+      "ticker": "ALRS",
+      "candles": 26686,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "BSPB",
+      "candles": 25209,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "CBOM",
+      "candles": 22606,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            },
+            {
+              "feature": "range_expansion",
+              "label": "Расширение диапазона"
+            }
+          ],
+          "train": {
+            "occurrences": 156,
+            "wins": 96,
+            "winRate": 0.6153846153846154,
+            "averageReturn": 0.4147661714630037,
+            "medianReturn": 1.3,
+            "profitFactor": 1.6296187558170725,
+            "maxDrawdown": 26.005202569234385,
+            "averageMae": 2.4618837279265295,
+            "averageMfe": 3.574596815757162
+          },
+          "validation": {
+            "occurrences": 55,
+            "wins": 32,
+            "winRate": 0.5818181818181818,
+            "averageReturn": 0.8006432607781079,
+            "medianReturn": 1.3,
+            "profitFactor": 2.966850503502662,
+            "maxDrawdown": 9.751843049392093,
+            "averageMae": 6.805702218103088,
+            "averageMfe": 3.90572069674988
+          },
+          "test": {
+            "occurrences": 49,
+            "wins": 31,
+            "winRate": 0.6326530612244898,
+            "averageReturn": -0.3974569460229659,
+            "medianReturn": 1.3,
+            "profitFactor": 0.7495618091804479,
+            "maxDrawdown": 30.355345572265215,
+            "averageMae": 5.705112168048864,
+            "averageMfe": 3.8626689430107097
+          },
+          "confidence": 67,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            },
+            {
+              "feature": "ema_bull",
+              "label": "EMA20 > EMA50"
+            }
+          ],
+          "train": {
+            "occurrences": 130,
+            "wins": 81,
+            "winRate": 0.6230769230769231,
+            "averageReturn": 0.5174784319782971,
+            "medianReturn": 1.3,
+            "profitFactor": 1.9675116274729256,
+            "maxDrawdown": 27.046104895238322,
+            "averageMae": 2.3415423715407133,
+            "averageMfe": 3.7063826179208057
+          },
+          "validation": {
+            "occurrences": 40,
+            "wins": 26,
+            "winRate": 0.65,
+            "averageReturn": 0.35329615249484625,
+            "medianReturn": 1.3,
+            "profitFactor": 1.452199666192309,
+            "maxDrawdown": 24.469040405915354,
+            "averageMae": 4.74410660984605,
+            "averageMfe": 4.274776120070863
+          },
+          "test": {
+            "occurrences": 51,
+            "wins": 31,
+            "winRate": 0.6078431372549019,
+            "averageReturn": -0.053719537882935486,
+            "medianReturn": 1.3,
+            "profitFactor": 0.9587375342711771,
+            "maxDrawdown": 30.772949047897647,
+            "averageMae": 5.086290003140933,
+            "averageMfe": 4.007461707349081
+          },
+          "confidence": 64,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            },
+            {
+              "feature": "above_vwap",
+              "label": "Цена выше VWAP"
+            }
+          ],
+          "train": {
+            "occurrences": 176,
+            "wins": 106,
+            "winRate": 0.6022727272727273,
+            "averageReturn": 0.4405690554428798,
+            "medianReturn": 1.3,
+            "profitFactor": 1.7359295112069153,
+            "maxDrawdown": 26.005202569234385,
+            "averageMae": 2.511464295312268,
+            "averageMfe": 3.5277167006610877
+          },
+          "validation": {
+            "occurrences": 61,
+            "wins": 39,
+            "winRate": 0.639344262295082,
+            "averageReturn": 0.6816079832975098,
+            "medianReturn": 1.3,
+            "profitFactor": 2.1409511312563754,
+            "maxDrawdown": 28.21044177550673,
+            "averageMae": 6.3962017834850124,
+            "averageMfe": 3.848743442325196
+          },
+          "test": {
+            "occurrences": 59,
+            "wins": 34,
+            "winRate": 0.576271186440678,
+            "averageReturn": -0.05839487653606902,
+            "medianReturn": 1.3,
+            "profitFactor": 0.9554185474360071,
+            "maxDrawdown": 29.987906816896203,
+            "averageMae": 5.0863180508225625,
+            "averageMfe": 4.299136612151378
+          },
+          "confidence": 62,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 2,
+          "conditions": [
+            {
+              "feature": "ema_bull",
+              "label": "EMA20 > EMA50"
+            },
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            }
+          ],
+          "train": {
+            "occurrences": 130,
+            "wins": 80,
+            "winRate": 0.6153846153846154,
+            "averageReturn": 0.49276515650952146,
+            "medianReturn": 1.3,
+            "profitFactor": 1.8547269216517528,
+            "maxDrawdown": 28.640300081559126,
+            "averageMae": 2.080146232402128,
+            "averageMfe": 3.207860704528755
+          },
+          "validation": {
+            "occurrences": 40,
+            "wins": 24,
+            "winRate": 0.6,
+            "averageReturn": 0.7755790178809898,
+            "medianReturn": 1.3,
+            "profitFactor": 3.0682935774339533,
+            "maxDrawdown": 8.646167618126796,
+            "averageMae": 3.8155814894794586,
+            "averageMfe": 3.8091893196340316
+          },
+          "test": {
+            "occurrences": 51,
+            "wins": 30,
+            "winRate": 0.5882352941176471,
+            "averageReturn": 0.20831188380502397,
+            "medianReturn": 1.3,
+            "profitFactor": 1.2069985717259994,
+            "maxDrawdown": 15.516929066140815,
+            "averageMae": 4.072194824449042,
+            "averageMfe": 3.7644163958179306
+          },
+          "confidence": 60,
+          "quality": "weak_oos"
+        }
+      ],
+      "bestTestWinRate": 0.6326530612244898
+    },
+    {
+      "ticker": "CHMF",
+      "candles": 26592,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "CNRU",
+      "candles": 26408,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "DOMRF",
+      "candles": 16323,
+      "firstDate": "2025-11-20T13:00:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 246,
+      "dataDays": 263.3229166666667,
+      "status": "insufficient_data",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "ENPG",
+      "candles": 25456,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "FLOT",
+      "candles": 25368,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "momentum_up",
+              "label": "Импульс 1ч/4ч вверх"
+            },
+            {
+              "feature": "above_vwap",
+              "label": "Цена выше VWAP"
+            }
+          ],
+          "train": {
+            "occurrences": 209,
+            "wins": 130,
+            "winRate": 0.6220095693779905,
+            "averageReturn": 0.022756432045329174,
+            "medianReturn": 1.3,
+            "profitFactor": 1.0255030206479019,
+            "maxDrawdown": 58.450029038355005,
+            "averageMae": 2.4003724378569555,
+            "averageMfe": 2.685268174893813
+          },
+          "validation": {
+            "occurrences": 73,
+            "wins": 41,
+            "winRate": 0.5616438356164384,
+            "averageReturn": 0.5152260765073127,
+            "medianReturn": 1.3,
+            "profitFactor": 2.1157530890060148,
+            "maxDrawdown": 18.84010230052965,
+            "averageMae": 1.953735012729882,
+            "averageMfe": 2.580524613186416
+          },
+          "test": {
+            "occurrences": 69,
+            "wins": 49,
+            "winRate": 0.7101449275362319,
+            "averageReturn": 0.34427815180596877,
+            "medianReturn": 1.3,
+            "profitFactor": 1.3986539311331798,
+            "maxDrawdown": 32.503712832196285,
+            "averageMae": 3.207609829153406,
+            "averageMfe": 3.8439635018968557
+          },
+          "confidence": 83,
+          "quality": "validated"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "momentum_up",
+              "label": "Импульс 1ч/4ч вверх"
+            }
+          ],
+          "train": {
+            "occurrences": 215,
+            "wins": 137,
+            "winRate": 0.6372093023255814,
+            "averageReturn": 0.08641659719930753,
+            "medianReturn": 1.3,
+            "profitFactor": 1.1024234228134728,
+            "maxDrawdown": 55.82145881960054,
+            "averageMae": 2.38264385944413,
+            "averageMfe": 2.7225727695210677
+          },
+          "validation": {
+            "occurrences": 74,
+            "wins": 42,
+            "winRate": 0.5675675675675675,
+            "averageReturn": 0.48261357004640765,
+            "medianReturn": 1.3,
+            "profitFactor": 1.9846610496529749,
+            "maxDrawdown": 19.071440507161753,
+            "averageMae": 1.979957544847961,
+            "averageMfe": 2.566185154405139
+          },
+          "test": {
+            "occurrences": 70,
+            "wins": 49,
+            "winRate": 0.7,
+            "averageReturn": 0.31354263414097355,
+            "medianReturn": 1.3,
+            "profitFactor": 1.35748397818057,
+            "maxDrawdown": 32.503712832196285,
+            "averageMae": 3.1646333387963663,
+            "averageMfe": 3.832556669799368
+          },
+          "confidence": 82,
+          "quality": "validated"
+        },
+        {
+          "direction": "LONG",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "rsi_low",
+              "label": "RSI < 35"
+            },
+            {
+              "feature": "opening_hour",
+              "label": "Первые 90 минут"
+            }
+          ],
+          "train": {
+            "occurrences": 49,
+            "wins": 30,
+            "winRate": 0.6122448979591837,
+            "averageReturn": 0.010565959391447288,
+            "medianReturn": 1.3,
+            "profitFactor": 1.0126070172702606,
+            "maxDrawdown": 18.481254392351545,
+            "averageMae": 2.1263246232167217,
+            "averageMfe": 3.190957630875001
+          },
+          "validation": {
+            "occurrences": 23,
+            "wins": 15,
+            "winRate": 0.6521739130434783,
+            "averageReturn": 0.2232690361670103,
+            "medianReturn": 1.3,
+            "profitFactor": 1.3446102161402307,
+            "maxDrawdown": 9.27518619496115,
+            "averageMae": 2.059819462977639,
+            "averageMfe": 2.847118691911173
+          },
+          "test": {
+            "occurrences": 23,
+            "wins": 13,
+            "winRate": 0.5652173913043478,
+            "averageReturn": -0.027665111441553612,
+            "medianReturn": 1.3,
+            "profitFactor": 0.9812235490469674,
+            "maxDrawdown": 14.978080468369999,
+            "averageMae": 3.4588274284556038,
+            "averageMfe": 3.3294317733486767
+          },
+          "confidence": 44,
+          "quality": "weak_oos"
+        }
+      ],
+      "bestTestWinRate": 0.7101449275362319
+    },
+    {
+      "ticker": "GAZP",
+      "candles": 27158,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "GMKN",
+      "candles": 26837,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "HEAD",
+      "candles": 26266,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "IRAO",
+      "candles": 26942,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "LENT",
+      "candles": 25597,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "LKOH",
+      "candles": 27102,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "MAGN",
+      "candles": 26848,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "ema_bear",
+              "label": "EMA20 < EMA50"
+            },
+            {
+              "feature": "momentum_up",
+              "label": "Импульс 1ч/4ч вверх"
+            }
+          ],
+          "train": {
+            "occurrences": 168,
+            "wins": 101,
+            "winRate": 0.6011904761904762,
+            "averageReturn": 0.2506812890197988,
+            "medianReturn": 1.3,
+            "profitFactor": 1.3270374654585337,
+            "maxDrawdown": 52.11123641172442,
+            "averageMae": 2.2646876408520247,
+            "averageMfe": 2.845994742956631
+          },
+          "validation": {
+            "occurrences": 64,
+            "wins": 45,
+            "winRate": 0.703125,
+            "averageReturn": 0.5237651401585256,
+            "medianReturn": 1.3,
+            "profitFactor": 2.054817401209887,
+            "maxDrawdown": 13.182153234817065,
+            "averageMae": 2.1303610101441386,
+            "averageMfe": 3.2833197257455042
+          },
+          "test": {
+            "occurrences": 52,
+            "wins": 31,
+            "winRate": 0.5961538461538461,
+            "averageReturn": -0.10405453333234868,
+            "medianReturn": 1.3,
+            "profitFactor": 0.9286403943360009,
+            "maxDrawdown": 61.66644595751248,
+            "averageMae": 3.7747780925450494,
+            "averageMfe": 4.700963043860137
+          },
+          "confidence": 63,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "momentum_up",
+              "label": "Импульс 1ч/4ч вверх"
+            },
+            {
+              "feature": "below_vwap",
+              "label": "Цена ниже VWAP"
+            }
+          ],
+          "train": {
+            "occurrences": 111,
+            "wins": 71,
+            "winRate": 0.6396396396396397,
+            "averageReturn": 0.28193030983008005,
+            "medianReturn": 1.3,
+            "profitFactor": 1.4150278716292708,
+            "maxDrawdown": 23.539235641803458,
+            "averageMae": 1.998652308935028,
+            "averageMfe": 2.6908130124009912
+          },
+          "validation": {
+            "occurrences": 38,
+            "wins": 28,
+            "winRate": 0.7368421052631579,
+            "averageReturn": 0.9634329069998554,
+            "medianReturn": 1.3,
+            "profitFactor": 4.5168766773909335,
+            "maxDrawdown": 3.6975558651240767,
+            "averageMae": 2.0938508150429525,
+            "averageMfe": 3.157574795912842
+          },
+          "test": {
+            "occurrences": 43,
+            "wins": 25,
+            "winRate": 0.5813953488372093,
+            "averageReturn": -0.3522490347105761,
+            "medianReturn": 1.3,
+            "profitFactor": 0.7734041917492808,
+            "maxDrawdown": 57.32386131643075,
+            "averageMae": 4.135430867462819,
+            "averageMfe": 4.426641854758095
+          },
+          "confidence": 55,
+          "quality": "weak_oos"
+        }
+      ],
+      "bestTestWinRate": 0.5961538461538461
+    },
+    {
+      "ticker": "MDMG",
+      "candles": 26411,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "MOEX",
+      "candles": 26774,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "MSNG",
+      "candles": 23192,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            }
+          ],
+          "train": {
+            "occurrences": 190,
+            "wins": 115,
+            "winRate": 0.6052631578947368,
+            "averageReturn": 0.14008988266621555,
+            "medianReturn": 1.3,
+            "profitFactor": 1.178187229696139,
+            "maxDrawdown": 61.90492968255628,
+            "averageMae": 2.2486335747442143,
+            "averageMfe": 2.7507629929632684
+          },
+          "validation": {
+            "occurrences": 60,
+            "wins": 41,
+            "winRate": 0.6833333333333333,
+            "averageReturn": 0.6962176750186797,
+            "medianReturn": 1.3,
+            "profitFactor": 2.4782005388806083,
+            "maxDrawdown": 12.888001896249552,
+            "averageMae": 1.4096598173254866,
+            "averageMfe": 2.8004281488070544
+          },
+          "test": {
+            "occurrences": 57,
+            "wins": 40,
+            "winRate": 0.7017543859649122,
+            "averageReturn": -0.22586193229707358,
+            "medianReturn": 1.3,
+            "profitFactor": 0.8104636802958606,
+            "maxDrawdown": 35.55432580583242,
+            "averageMae": 3.652364763421868,
+            "averageMfe": 4.264082950893638
+          },
+          "confidence": 80,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            },
+            {
+              "feature": "above_vwap",
+              "label": "Цена выше VWAP"
+            }
+          ],
+          "train": {
+            "occurrences": 187,
+            "wins": 114,
+            "winRate": 0.6096256684491979,
+            "averageReturn": 0.13054868370983694,
+            "medianReturn": 1.3,
+            "profitFactor": 1.1644677654682751,
+            "maxDrawdown": 60.96188078514495,
+            "averageMae": 2.2487882611470127,
+            "averageMfe": 2.7562734908522537
+          },
+          "validation": {
+            "occurrences": 59,
+            "wins": 40,
+            "winRate": 0.6779661016949152,
+            "averageReturn": 0.6859840762901828,
+            "medianReturn": 1.3,
+            "profitFactor": 2.4321981469684038,
+            "maxDrawdown": 12.888001896249556,
+            "averageMae": 1.4335523566021897,
+            "averageMfe": 2.7756785982940775
+          },
+          "test": {
+            "occurrences": 57,
+            "wins": 40,
+            "winRate": 0.7017543859649122,
+            "averageReturn": -0.22586193229707358,
+            "medianReturn": 1.3,
+            "profitFactor": 0.8104636802958606,
+            "maxDrawdown": 35.55432580583242,
+            "averageMae": 3.6321883587870496,
+            "averageMfe": 4.2824361836417735
+          },
+          "confidence": 80,
+          "quality": "weak_oos"
+        },
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "rsi_high",
+              "label": "RSI > 65"
+            },
+            {
+              "feature": "ema_bear",
+              "label": "EMA20 < EMA50"
+            }
+          ],
+          "train": {
+            "occurrences": 37,
+            "wins": 23,
+            "winRate": 0.6216216216216216,
+            "averageReturn": -0.05330714448048549,
+            "medianReturn": 1.3,
+            "profitFactor": 0.9514474306032348,
+            "maxDrawdown": 26.680877776450995,
+            "averageMae": 2.4017819810205063,
+            "averageMfe": 3.08012226686711
+          },
+          "validation": {
+            "occurrences": 19,
+            "wins": 13,
+            "winRate": 0.6842105263157895,
+            "averageReturn": -0.47053168723665617,
+            "medianReturn": 1.3,
+            "profitFactor": 0.6540221846800773,
+            "maxDrawdown": 16.74010205749647,
+            "averageMae": 2.1529871253079818,
+            "averageMfe": 2.169885937189914
+          },
+          "test": {
+            "occurrences": 15,
+            "wins": 9,
+            "winRate": 0.6,
+            "averageReturn": -0.9938937041217923,
+            "medianReturn": 1.3,
+            "profitFactor": 0.439710676117517,
+            "maxDrawdown": 16.208405561826886,
+            "averageMae": 3.6482122000533086,
+            "averageMfe": 4.5184537171866195
+          },
+          "confidence": 47,
+          "quality": "weak_oos"
+        }
+      ],
+      "bestTestWinRate": 0.7017543859649122
+    },
+    {
+      "ticker": "MTSS",
+      "candles": 26578,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "NLMK",
+      "candles": 26462,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            },
+            {
+              "feature": "opening_hour",
+              "label": "Первые 90 минут"
+            }
+          ],
+          "train": {
+            "occurrences": 54,
+            "wins": 34,
+            "winRate": 0.6296296296296297,
+            "averageReturn": 0.4736961829109614,
+            "medianReturn": 1.3,
+            "profitFactor": 1.7334999269771991,
+            "maxDrawdown": 15.922916532813655,
+            "averageMae": 1.8278798868042898,
+            "averageMfe": 2.7310294168609626
+          },
+          "validation": {
+            "occurrences": 13,
+            "wins": 10,
+            "winRate": 0.7692307692307693,
+            "averageReturn": 1.2315559696899174,
+            "medianReturn": 1.3,
+            "profitFactor": 99,
+            "maxDrawdown": 0,
+            "averageMae": 0.8546000714226933,
+            "averageMfe": 2.584589074128686
+          },
+          "test": {
+            "occurrences": 17,
+            "wins": 11,
+            "winRate": 0.6470588235294118,
+            "averageReturn": 0.41025113763037085,
+            "medianReturn": 1.3,
+            "profitFactor": 1.3641882412173714,
+            "maxDrawdown": 16.550177162237397,
+            "averageMae": 3.6581987756060053,
+            "averageMfe": 5.47199763373885
+          },
+          "confidence": 56,
+          "quality": "validated"
+        }
+      ],
+      "bestTestWinRate": 0.6470588235294118
+    },
+    {
+      "ticker": "NVTK",
+      "candles": 27024,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "PHOR",
+      "candles": 25668,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "PLZL",
+      "candles": 27050,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "POSI",
+      "candles": 25749,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "RAGR",
+      "candles": 26771,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "RENI",
+      "candles": 25099,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "ROSN",
+      "candles": 27180,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "RTKM",
+      "candles": 25914,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "RUAL",
+      "candles": 26568,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "SBER",
+      "candles": 27193,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "SBERP",
+      "candles": 27087,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "SVCB",
+      "candles": 26292,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "T",
+      "candles": 27002,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 363,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "TATN",
+      "candles": 26875,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 362,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "TATNP",
+      "candles": 26638,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 362,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "above_vwap",
+              "label": "Цена выше VWAP"
+            },
+            {
+              "feature": "ema_bear",
+              "label": "EMA20 < EMA50"
+            }
+          ],
+          "train": {
+            "occurrences": 166,
+            "wins": 103,
+            "winRate": 0.6204819277108434,
+            "averageReturn": -0.002035348164480861,
+            "medianReturn": 1.3,
+            "profitFactor": 0.9978592982532104,
+            "maxDrawdown": 48.497976458378645,
+            "averageMae": 2.4086117962350686,
+            "averageMfe": 2.827062893432097
+          },
+          "validation": {
+            "occurrences": 54,
+            "wins": 30,
+            "winRate": 0.5555555555555556,
+            "averageReturn": 0.2546896800830196,
+            "medianReturn": 1.3,
+            "profitFactor": 1.388514049166968,
+            "maxDrawdown": 18.619312057123253,
+            "averageMae": 1.9919975776686654,
+            "averageMfe": 2.3684590739908082
+          },
+          "test": {
+            "occurrences": 52,
+            "wins": 34,
+            "winRate": 0.6538461538461539,
+            "averageReturn": 0.37372770582791226,
+            "medianReturn": 1.3,
+            "profitFactor": 1.3729765865109758,
+            "maxDrawdown": 25.618519560024986,
+            "averageMae": 3.9213688417915455,
+            "averageMfe": 5.134617111807292
+          },
+          "confidence": 71,
+          "quality": "validated"
+        }
+      ],
+      "bestTestWinRate": 0.6538461538461539
+    },
+    {
+      "ticker": "TRNFP",
+      "candles": 26800,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "VKCO",
+      "candles": 26645,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "VTBR",
+      "candles": 27191,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "X5",
+      "candles": 27026,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [],
+      "bestTestWinRate": null
+    },
+    {
+      "ticker": "YDEX",
+      "candles": 27103,
+      "firstDate": "2025-08-11T03:45:00.000Z",
+      "lastDate": "2026-08-10T20:45:00.000Z",
+      "tradingSessions": 364,
+      "dataDays": 364.7083333333333,
+      "status": "ok",
+      "setups": [
+        {
+          "direction": "SHORT",
+          "targetPercent": 1.5,
+          "horizonDays": 3,
+          "conditions": [
+            {
+              "feature": "breakout_up",
+              "label": "Пробой максимума 5ч"
+            },
+            {
+              "feature": "ema_bear",
+              "label": "EMA20 < EMA50"
+            }
+          ],
+          "train": {
+            "occurrences": 96,
+            "wins": 58,
+            "winRate": 0.6041666666666666,
+            "averageReturn": 0.22630078071313076,
+            "medianReturn": 1.3,
+            "profitFactor": 1.3434488563110432,
+            "maxDrawdown": 19.131573817787537,
+            "averageMae": 1.887695243163778,
+            "averageMfe": 2.1966372619838475
+          },
+          "validation": {
+            "occurrences": 33,
+            "wins": 19,
+            "winRate": 0.5757575757575758,
+            "averageReturn": 0.2670370085393239,
+            "medianReturn": 1.3,
+            "profitFactor": 1.5130324430278097,
+            "maxDrawdown": 7.9941622916733746,
+            "averageMae": 1.320918073754655,
+            "averageMfe": 2.05366669507242
+          },
+          "test": {
+            "occurrences": 33,
+            "wins": 21,
+            "winRate": 0.6363636363636364,
+            "averageReturn": 0.5062613551593099,
+            "medianReturn": 1.3,
+            "profitFactor": 1.864832484656997,
+            "maxDrawdown": 10.315924663458368,
+            "averageMae": 2.507827554921854,
+            "averageMfe": 3.9050813317431636
+          },
+          "confidence": 61,
+          "quality": "validated"
+        }
+      ],
+      "bestTestWinRate": 0.6363636363636364
+    }
+  ]
+}

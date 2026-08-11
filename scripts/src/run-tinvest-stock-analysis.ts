@@ -604,7 +604,15 @@ function discover(features: Feature[], target: number, horizon: number, directio
     const train = stats(labels as Label[], matching(trainIndexes));
     const validation = stats(labels as Label[], matching(validationIndexes));
     const test = stats(labels as Label[], matching(testIndexes));
-    if (!train || !validation || !test) continue;
+    if (
+      !train ||
+      !validation ||
+      !test ||
+      validation.occurrences < MIN_OOS_OCCURRENCES ||
+      test.occurrences < MIN_OOS_OCCURRENCES
+    ) {
+      continue;
+    }
     if (train.winRate < MIN_TRAIN_WIN_RATE || validation.winRate < MIN_OOS_WIN_RATE || test.winRate < MIN_OOS_WIN_RATE) continue;
     results.push({
       direction,
@@ -615,7 +623,12 @@ function discover(features: Feature[], target: number, horizon: number, directio
       validation,
       test,
       confidence: confidence(train, validation, test),
-      quality: test.winRate >= 0.6 ? "validated" : "weak_oos",
+      quality:
+        test.winRate >= 0.6 &&
+        test.profitFactor >= 1 &&
+        test.averageReturn > 0
+          ? "validated"
+          : "weak_oos",
     });
   }
   return results.sort((a, b) => b.confidence - a.confidence).slice(0, 10);
